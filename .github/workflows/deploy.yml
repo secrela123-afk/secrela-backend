@@ -1,0 +1,74 @@
+# Secrela API — build on GitHub, then deploy to VPS over SSH.
+# Secrets (repo Settings → Secrets → Actions):
+#   VPS_HOST, VPS_USER, VPS_SSH_KEY  (+ optional VPS_PORT)
+name: Deploy API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-api-production
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck & compile
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+  deploy:
+    name: Deploy to VPS
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: SSH — pull, build, restart PM2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            APP_DIR="/var/www/secrela-api"
+            if [ ! -d "$APP_DIR/.git" ]; then
+              echo "Missing $APP_DIR — run server setup first (clone secrela-backend)."
+              exit 1
+            fi
+            if [ ! -f "$APP_DIR/.env" ]; then
+              echo "Missing $APP_DIR/.env — create production env on the server."
+              exit 1
+            fi
+            cd "$APP_DIR"
+            git fetch origin main
+            git reset --hard origin/main
+            npm ci
+            npm run build
+            if pm2 describe secrela-api >/dev/null 2>&1; then
+              pm2 restart secrela-api --update-env
+            else
+              pm2 start dist/index.js --name secrela-api
+            fi
+            pm2 save
+            echo "API deploy complete."

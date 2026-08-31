@@ -762,7 +762,7 @@ export async function activateSubscriptionForUser(
   planSlug: PlanSlug,
   interval: BillingInterval,
 ): Promise<CurrentOrganizationResult> {
-  if (env.lemonSqueezy.configured) {
+  if (env.paypal.configured) {
     throw new AppError(
       400,
       "Use secure card checkout to activate a paid plan.",

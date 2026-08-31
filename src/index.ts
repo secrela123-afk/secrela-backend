@@ -17,6 +17,17 @@ async function main() {
     console.log(
       `[securevault-api] google: ${env.googleOAuth.enabled ? "OAuth enabled" : "OAuth DISABLED (set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET in backend/.env)"}`,
     );
+    console.log(
+      `[securevault-api] paypal: ${
+        env.paypal.configured
+          ? `enabled (${env.paypal.mode})`
+          : "DISABLED (missing client or plan ids)"
+      }`,
+    );
+    const mongoHost = env.mongodbUri.includes("127.0.0.1")
+      ? "local"
+      : "remote";
+    console.log(`[securevault-api] mongo target: ${mongoHost}`);
   });
 
   try {

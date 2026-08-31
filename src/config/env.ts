@@ -53,7 +53,7 @@ function requirePort(value: string | undefined, fallback: number): number {
 }
 
 function parseCorsOrigins(value: string | undefined): string[] {
-  const raw = value ?? "http://localhost:3000";
+  const raw = value ?? "http://localhost:3010";
   return raw
     .split(",")
     .map((origin) => origin.trim())
@@ -192,14 +192,14 @@ const googleClientId = process.env.GOOGLE_CLIENT_ID?.trim() ?? "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim() ?? "";
 const googleRedirectUri =
   process.env.GOOGLE_REDIRECT_URI?.trim() ||
-  `http://localhost:4000/api/v1/auth/oauth/google/callback`;
+  `http://localhost:5005/api/v1/auth/oauth/google/callback`;
 
 export const env = {
   nodeEnv,
-  port: requirePort(process.env.PORT, 4000),
+  port: requirePort(process.env.PORT, 5005),
   corsOrigins: parseCorsOrigins(process.env.CORS_ORIGINS),
   mongodbUri: requireMongodbUri(process.env.MONGODB_URI),
-  appOrigin: (process.env.APP_ORIGIN ?? "http://localhost:3000").replace(/\/$/, ""),
+  appOrigin: (process.env.APP_ORIGIN ?? "http://localhost:3010").replace(/\/$/, ""),
   appName,
   cookieName: process.env.SESSION_COOKIE_NAME ?? "sv_session",
   /** Session lifetime in milliseconds (default 7 days). */
@@ -275,6 +275,42 @@ export const env = {
       /** Dev-only DB activate — must be explicitly `true`; never default on in development. */
       allowMockActivate: parseBoolean(
         process.env.LEMON_SQUEEZY_ALLOW_MOCK_ACTIVATE,
+        false,
+      ),
+    };
+  })(),
+  /**
+   * PayPal Subscriptions (current checkout provider).
+   * Sandbox vs live is PAYPAL_MODE. Plan IDs come from the PayPal dashboard.
+   */
+  paypal: (() => {
+    const clientId = process.env.PAYPAL_CLIENT_ID?.trim() ?? "";
+    const clientSecret = process.env.PAYPAL_CLIENT_SECRET?.trim() ?? "";
+    const modeRaw = (process.env.PAYPAL_MODE ?? "sandbox").toLowerCase();
+    const mode: "sandbox" | "live" = modeRaw === "live" ? "live" : "sandbox";
+    const plans = {
+      starterMonthly: process.env.PAYPAL_PLAN_STARTER_MONTHLY?.trim() ?? "",
+      starterYearly: process.env.PAYPAL_PLAN_STARTER_YEARLY?.trim() ?? "",
+      teamMonthly: process.env.PAYPAL_PLAN_TEAM_MONTHLY?.trim() ?? "",
+      teamYearly: process.env.PAYPAL_PLAN_TEAM_YEARLY?.trim() ?? "",
+    };
+    const configured = Boolean(
+      clientId &&
+        clientSecret &&
+        plans.starterMonthly &&
+        plans.starterYearly &&
+        plans.teamMonthly &&
+        plans.teamYearly,
+    );
+    return {
+      configured,
+      clientId,
+      clientSecret,
+      mode,
+      webhookId: process.env.PAYPAL_WEBHOOK_ID?.trim() ?? "",
+      plans,
+      allowMockActivate: parseBoolean(
+        process.env.PAYPAL_ALLOW_MOCK_ACTIVATE,
         false,
       ),
     };

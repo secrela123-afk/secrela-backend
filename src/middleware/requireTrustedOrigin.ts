@@ -24,12 +24,12 @@ export function requireTrustedOrigin(
       return;
     }
 
-    // Lemon Squeezy webhooks are server-to-server (no browser Origin).
-    // Authenticity is verified via HMAC signature in the billing controller.
+    // PayPal webhooks are server-to-server (no browser Origin).
+    // Authenticity is verified via PayPal's webhook signature API.
     const path = req.originalUrl.split("?")[0] ?? "";
     if (
       req.method.toUpperCase() === "POST" &&
-      path.endsWith("/billing/webhooks/lemonsqueezy")
+      path.endsWith("/billing/webhooks/paypal")
     ) {
       next();
       return;

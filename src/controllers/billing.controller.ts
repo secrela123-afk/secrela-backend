@@ -1,10 +1,14 @@
 import type { Request, Response } from "express";
 import { AppError } from "../lib/errors/AppError.js";
 import {
+  captureCardCheckoutForUser,
+  createCardCheckoutOrderForUser,
   createCheckoutSessionForUser,
   getBillingOverviewForUser,
-  handleLemonWebhook,
-  verifyLemonWebhookSignature,
+  getPaypalCardClientToken,
+  getPaypalCardSdkConfig,
+  handlePaypalWebhook,
+  verifyPaypalWebhookRequest,
 } from "../services/billing.service.js";
 
 function requireUserId(req: Request): string {
@@ -33,18 +37,57 @@ export async function createCheckout(req: Request, res: Response) {
   res.status(200).json(result);
 }
 
-export async function lemonWebhook(req: Request, res: Response) {
-  const raw =
-    (req as Request & { rawBody?: Buffer }).rawBody ??
-    Buffer.from(JSON.stringify(req.body ?? {}));
-  const signature = req.get("x-signature") ?? undefined;
+export async function paypalCardConfig(req: Request, res: Response) {
+  requireUserId(req);
+  res.status(200).json(getPaypalCardSdkConfig());
+}
 
-  if (!verifyLemonWebhookSignature(raw, signature)) {
-    throw new AppError(401, "Invalid Lemon Squeezy webhook signature", {
+export async function paypalCardClientToken(req: Request, res: Response) {
+  requireUserId(req);
+  const result = await getPaypalCardClientToken();
+  res.status(200).json(result);
+}
+
+export async function createCardOrder(req: Request, res: Response) {
+  const { planSlug, interval } = req.body as {
+    planSlug: "starter" | "team";
+    interval: "monthly" | "yearly";
+  };
+  const result = await createCardCheckoutOrderForUser(
+    requireUserId(req),
+    planSlug,
+    interval,
+  );
+  res.status(200).json(result);
+}
+
+export async function captureCardOrder(req: Request, res: Response) {
+  const { orderId } = req.body as { orderId: string };
+  const billing = await captureCardCheckoutForUser(
+    requireUserId(req),
+    orderId,
+  );
+  res.status(200).json({ billing });
+}
+
+export async function paypalWebhook(req: Request, res: Response) {
+  const ok = await verifyPaypalWebhookRequest(
+    {
+      transmissionId: req.get("paypal-transmission-id") ?? undefined,
+      transmissionTime: req.get("paypal-transmission-time") ?? undefined,
+      certUrl: req.get("paypal-cert-url") ?? undefined,
+      authAlgo: req.get("paypal-auth-algo") ?? undefined,
+      transmissionSig: req.get("paypal-transmission-sig") ?? undefined,
+    },
+    req.body,
+  );
+
+  if (!ok) {
+    throw new AppError(401, "Invalid PayPal webhook signature", {
       code: "WEBHOOK_SIGNATURE_INVALID",
     });
   }
 
-  const result = await handleLemonWebhook(req.body);
+  const result = await handlePaypalWebhook(req.body);
   res.status(200).json(result);
 }

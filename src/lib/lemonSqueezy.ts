@@ -1,4 +1,8 @@
 /**
+ * DISABLED — checkout now uses PayPal (`lib/paypal.ts`).
+ * This file is kept so we can restore Lemon later; nothing in the live
+ * request path imports these functions.
+ *
  * Minimal Lemon Squeezy REST client (JSON:API).
  * Docs: https://docs.lemonsqueezy.com/api
  */

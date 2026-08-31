@@ -216,6 +216,14 @@ const organizationSchema = new Schema(
       default: null,
       maxlength: 800,
     },
+    /** PayPal Subscriptions ID (current billing provider). */
+    paypalSubscriptionId: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 80,
+      index: true,
+    },
     /**
      * Org DEK wrapped by platform KEK (AD-005).
      * Never store the raw DEK or secret plaintext here.

@@ -1,5 +1,5 @@
 /**
- * End-to-end smoke test against a running API (localhost:4000).
+ * End-to-end smoke test against a running API (localhost:5005).
  * Marks email verified via MongoDB (test harness only — not production).
  *
  * Run: npx tsx scripts/smoke-auth-mfa.ts
@@ -8,7 +8,7 @@ import "dotenv/config";
 import mongoose from "mongoose";
 import { Secret, TOTP } from "otpauth";
 
-const API = process.env.SMOKE_API_URL ?? "http://localhost:4000";
+const API = process.env.SMOKE_API_URL ?? "http://localhost:5005";
 const COOKIE = "sv_session";
 
 type StepResult = { name: string; ok: boolean; detail?: string };

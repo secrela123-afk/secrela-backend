@@ -1,11 +1,20 @@
-import crypto from "node:crypto";
 import { env } from "../config/env.js";
 import { AppError } from "../lib/errors/AppError.js";
 import {
-  createLemonCheckout,
-  updateLemonSubscription,
-  variantIdForPlan,
-} from "../lib/lemonSqueezy.js";
+  activatePaypalSubscription,
+  capturePaypalOrder,
+  createPaypalCaptureOrder,
+  createPaypalSubscription,
+  decodePaypalCustomId,
+  encodePaypalCustomId,
+  generatePaypalClientToken,
+  getPaypalSubscription,
+  paypalMode,
+  paypalPlanIdFor,
+  paypalPublicClientId,
+  suspendPaypalSubscription,
+  verifyPaypalWebhook,
+} from "../lib/paypal.js";
 import {
   amountCentsForPlan,
   planDisplayName,
@@ -28,7 +37,7 @@ export type PaymentMethodDto = {
 };
 
 export type BillingOverview = {
-  lemonConfigured: boolean;
+  paypalConfigured: boolean;
   planSlug: PlanSlug;
   planLabel: string;
   subscriptionStatus: SubscriptionStatus;
@@ -43,7 +52,7 @@ export type BillingOverview = {
   paymentMethods: PaymentMethodDto[];
   updatePaymentUrl: string | null;
   customerPortalUrl: string | null;
-  lemonSubscriptionId: string | null;
+  paypalSubscriptionId: string | null;
 };
 
 function toIso(d: Date | null | undefined): string | null {
@@ -66,7 +75,7 @@ export function billingOverviewFromOrg(
   org: OrganizationDocument,
 ): BillingOverview {
   return {
-    lemonConfigured: env.lemonSqueezy.configured,
+    paypalConfigured: env.paypal.configured,
     planSlug: (org.planSlug ?? "starter") as PlanSlug,
     planLabel: org.plan ?? planDisplayName((org.planSlug ?? "starter") as PlanSlug),
     subscriptionStatus: (org.subscriptionStatus ??
@@ -82,7 +91,7 @@ export function billingOverviewFromOrg(
     paymentMethods: paymentMethodsDto(org),
     updatePaymentUrl: org.lemonUpdatePaymentUrl ?? null,
     customerPortalUrl: org.lemonCustomerPortalUrl ?? null,
-    lemonSubscriptionId: org.lemonSubscriptionId ?? null,
+    paypalSubscriptionId: org.paypalSubscriptionId ?? null,
   };
 }
 
@@ -100,8 +109,9 @@ export async function getBillingOverviewForUser(
 }
 
 /**
- * Create a Lemon Squeezy hosted checkout for the org's owner/admin.
- * Card is saved by Lemon for monthly/yearly renewals.
+ * Create a PayPal hosted subscription approval URL for the org's owner/admin.
+ * The customer can pay with a Visa/Mastercard on PayPal without a PayPal account
+ * (guest checkout), when PayPal allows it for that buyer country.
  */
 export async function createCheckoutSessionForUser(
   userId: string,
@@ -128,12 +138,11 @@ export async function createCheckoutSessionForUser(
     throw new AppError(401, "User not found", { code: "UNAUTHORIZED" });
   }
 
-  // Local/dev fallback when Lemon is not configured yet.
-  if (!env.lemonSqueezy.configured) {
-    if (!env.lemonSqueezy.allowMockActivate) {
+  if (!env.paypal.configured) {
+    if (!env.paypal.allowMockActivate) {
       throw new AppError(
         503,
-        "Lemon Squeezy is not configured. Add API keys and variant IDs to backend/.env.",
+        "PayPal is not configured. Add PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, and PAYPAL_PLAN_* ids.",
         { code: "BILLING_PROVIDER_NOT_CONFIGURED" },
       );
     }
@@ -144,29 +153,194 @@ export async function createCheckoutSessionForUser(
     return { checkoutUrl: `${env.appOrigin}/app/billing?mock=1`, mockActivated: true };
   }
 
-  const variantId = variantIdForPlan(planSlug, interval);
-  if (!variantId) {
-    throw new AppError(500, "Missing Lemon Squeezy variant ID for this plan", {
-      code: "LEMON_VARIANT_MISSING",
+  const planId = paypalPlanIdFor(planSlug, interval);
+  if (!planId) {
+    throw new AppError(500, "Missing PayPal plan ID for this plan", {
+      code: "PAYPAL_PLAN_MISSING",
     });
   }
 
-  const redirectUrl = `${env.appOrigin}/app/billing?checkout=success`;
+  const returnUrl = `${env.appOrigin}/app/billing?checkout=success`;
+  const cancelUrl = `${env.appOrigin}/checkout?plan=${planSlug}&interval=${interval}`;
 
-  const { checkoutUrl } = await createLemonCheckout({
-    variantId,
-    email: user.email,
-    name: user.name,
-    redirectUrl,
-    custom: {
-      organization_id: organization._id.toString(),
-      user_id: userId,
-      plan_slug: planSlug,
-      billing_interval: interval,
-    },
+  const { approveUrl, subscriptionId } = await createPaypalSubscription({
+    planId,
+    customId: encodePaypalCustomId(
+      organization._id.toString(),
+      planSlug,
+      interval,
+    ),
+    returnUrl,
+    cancelUrl,
+    brandName: env.appName,
   });
 
-  return { checkoutUrl };
+  organization.paypalSubscriptionId = subscriptionId;
+  await organization.save();
+
+  return { checkoutUrl: approveUrl };
+}
+
+async function requireOwnerOrAdmin(userId: string) {
+  const { membership, resolved } = await loadMembershipContext(userId);
+  if (resolved.systemKey !== "owner" && resolved.systemKey !== "admin") {
+    throw new AppError(403, "Only owners or admins can start checkout", {
+      code: "FORBIDDEN",
+    });
+  }
+  const organization = await Organization.findById(membership.organizationId);
+  if (!organization) {
+    throw new AppError(404, "Organization no longer exists", {
+      code: "ORGANIZATION_NOT_FOUND",
+    });
+  }
+  return { membership, organization };
+}
+
+export function getPaypalCardSdkConfig(): {
+  clientId: string;
+  mode: "sandbox" | "live";
+  currency: string;
+} {
+  if (!env.paypal.configured) {
+    throw new AppError(
+      503,
+      "PayPal is not configured. Add PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET.",
+      { code: "BILLING_PROVIDER_NOT_CONFIGURED" },
+    );
+  }
+  return {
+    clientId: paypalPublicClientId(),
+    mode: paypalMode(),
+    currency: "USD",
+  };
+}
+
+export async function getPaypalCardClientToken(): Promise<{
+  clientToken: string;
+}> {
+  if (!env.paypal.configured) {
+    throw new AppError(
+      503,
+      "PayPal is not configured. Add PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET.",
+      { code: "BILLING_PROVIDER_NOT_CONFIGURED" },
+    );
+  }
+  const clientToken = await generatePaypalClientToken();
+  return { clientToken };
+}
+
+function usdValueFromCents(cents: number): string {
+  return (cents / 100).toFixed(2);
+}
+
+export async function createCardCheckoutOrderForUser(
+  userId: string,
+  planSlug: "starter" | "team",
+  interval: BillingInterval,
+): Promise<{ orderId: string; amount: string; currency: string }> {
+  const { organization } = await requireOwnerOrAdmin(userId);
+
+  if (!env.paypal.configured) {
+    throw new AppError(
+      503,
+      "PayPal is not configured. Add PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET.",
+      { code: "BILLING_PROVIDER_NOT_CONFIGURED" },
+    );
+  }
+
+  const cents = amountCentsForPlan(planSlug, interval);
+  if (cents == null) {
+    throw new AppError(400, "This plan cannot be billed", {
+      code: "INVALID_PLAN",
+    });
+  }
+
+  const { orderId } = await createPaypalCaptureOrder({
+    customId: encodePaypalCustomId(
+      organization._id.toString(),
+      planSlug,
+      interval,
+    ),
+    description: `Secrela ${planDisplayName(planSlug)} ${interval}`,
+    value: usdValueFromCents(cents),
+    currency: "USD",
+  });
+
+  return { orderId, amount: usdValueFromCents(cents), currency: "USD" };
+}
+
+export async function captureCardCheckoutForUser(
+  userId: string,
+  orderId: string,
+): Promise<BillingOverview> {
+  const { organization } = await requireOwnerOrAdmin(userId);
+
+  const captured = await capturePaypalOrder(orderId);
+  const unit = captured.purchase_units?.[0];
+  const capture = unit?.payments?.captures?.[0];
+  const status = (capture?.status ?? captured.status ?? "").toUpperCase();
+  if (status !== "COMPLETED" && captured.status !== "COMPLETED") {
+    throw new AppError(402, "Card payment was not completed", {
+      code: "PAYPAL_CAPTURE_INCOMPLETE",
+    });
+  }
+
+  const decoded = decodePaypalCustomId(unit?.custom_id);
+  if (
+    !decoded ||
+    decoded.organizationId !== organization._id.toString()
+  ) {
+    throw new AppError(403, "Payment does not match this workspace", {
+      code: "PAYPAL_ORDER_MISMATCH",
+    });
+  }
+  if (decoded.planSlug !== "starter" && decoded.planSlug !== "team") {
+    throw new AppError(400, "Invalid paid plan on this order", {
+      code: "INVALID_PLAN",
+    });
+  }
+  if (decoded.interval !== "monthly" && decoded.interval !== "yearly") {
+    throw new AppError(400, "Invalid billing interval on this order", {
+      code: "INVALID_INTERVAL",
+    });
+  }
+
+  const expectedCents = amountCentsForPlan(
+    decoded.planSlug,
+    decoded.interval,
+  );
+  const paidValue =
+    capture?.amount?.value ?? unit?.amount?.value ?? "";
+  if (
+    expectedCents == null ||
+    paidValue !== usdValueFromCents(expectedCents)
+  ) {
+    throw new AppError(402, "Paid amount does not match the selected plan", {
+      code: "PAYPAL_AMOUNT_MISMATCH",
+    });
+  }
+
+  await activateOrganizationSubscription(
+    organization,
+    decoded.planSlug,
+    decoded.interval,
+  );
+  const fresh = await Organization.findById(organization._id);
+  if (!fresh) {
+    throw new AppError(404, "Organization no longer exists", {
+      code: "ORGANIZATION_NOT_FOUND",
+    });
+  }
+  fresh.autoRenew = false;
+  upsertPaymentMethod(
+    fresh,
+    captured.payment_source?.card?.brand,
+    captured.payment_source?.card?.last_digits,
+  );
+  await asMutableOrg(fresh).save();
+
+  return billingOverviewFromOrg(fresh);
 }
 
 /** Plain card row — InferSchemaType marks paymentMethods as DocumentArray. */
@@ -240,143 +414,86 @@ function upsertPaymentMethod(
   mutable.cardLast4 = last4;
 }
 
-function mapLemonStatus(
-  lemonStatus: string,
-): SubscriptionStatus {
-  switch (lemonStatus) {
-    case "on_trial":
-      return "trialing";
-    case "active":
-      return "active";
-    case "past_due":
-    case "unpaid":
-    case "paused":
+function mapPaypalStatus(paypalStatus: string): SubscriptionStatus {
+  switch (paypalStatus.toUpperCase()) {
+    case "APPROVAL_PENDING":
       return "pending_payment";
-    case "cancelled":
-      // Still active until ends_at if Lemon keeps access — handled by dates.
+    case "APPROVED":
+    case "ACTIVE":
       return "active";
-    case "expired":
+    case "SUSPENDED":
+      return "pending_payment";
+    case "CANCELLED":
+    case "EXPIRED":
       return "expired";
     default:
       return "pending_payment";
   }
 }
 
-type LemonWebhookPayload = {
-  meta?: {
-    event_name?: string;
-    custom_data?: Record<string, string>;
-  };
-  data?: {
+export type PaypalWebhookEvent = {
+  event_type?: string;
+  resource?: {
     id?: string;
-    type?: string;
-    attributes?: Record<string, unknown>;
+    custom_id?: string;
+    status?: string;
+    billing_info?: { next_billing_time?: string };
   };
 };
 
-export function verifyLemonWebhookSignature(
-  rawBody: Buffer,
-  signatureHeader: string | undefined,
-): boolean {
-  const secret = env.lemonSqueezy.webhookSecret;
-  if (!secret) {
-    // In development without secret, reject in production; allow unsigned only if explicitly empty + not production.
-    if (env.nodeEnv === "production") return false;
-    return true;
+export async function verifyPaypalWebhookRequest(
+  headers: {
+    transmissionId?: string;
+    transmissionTime?: string;
+    certUrl?: string;
+    authAlgo?: string;
+    transmissionSig?: string;
+  },
+  event: unknown,
+): Promise<boolean> {
+  if (
+    !headers.transmissionId ||
+    !headers.transmissionTime ||
+    !headers.certUrl ||
+    !headers.authAlgo ||
+    !headers.transmissionSig
+  ) {
+    return env.nodeEnv !== "production" && !env.paypal.webhookId;
   }
-  if (!signatureHeader) return false;
 
-  const digest = crypto
-    .createHmac("sha256", secret)
-    .update(rawBody)
-    .digest("hex");
-
-  try {
-    return crypto.timingSafeEqual(
-      Buffer.from(digest, "utf8"),
-      Buffer.from(signatureHeader, "utf8"),
-    );
-  } catch {
-    return false;
-  }
+  return verifyPaypalWebhook({
+    transmissionId: headers.transmissionId,
+    transmissionTime: headers.transmissionTime,
+    certUrl: headers.certUrl,
+    authAlgo: headers.authAlgo,
+    transmissionSig: headers.transmissionSig,
+    webhookEvent: event,
+  });
 }
 
-async function findOrgFromWebhook(
-  attrs: Record<string, unknown>,
-  custom: Record<string, string> | undefined,
-): Promise<OrganizationDocument | null> {
-  const orgId = custom?.organization_id;
-  if (orgId) {
-    const byCustom = await Organization.findById(orgId);
-    if (byCustom) return byCustom;
-  }
-
-  const subscriptionId = String(
-    attrs.subscription_id ?? attrs.id ?? "",
-  );
-  if (subscriptionId) {
-    const bySub = await Organization.findOne({
-      lemonSubscriptionId: subscriptionId,
-    });
-    if (bySub) return bySub;
-  }
-
-  const customerId = attrs.customer_id != null ? String(attrs.customer_id) : "";
-  if (customerId) {
-    return Organization.findOne({ lemonCustomerId: customerId });
-  }
-
-  return null;
-}
-
-/**
- * Apply Lemon subscription object fields onto the organization.
- */
-async function applySubscriptionAttributes(
+async function applyPaypalSubscriptionToOrg(
   org: OrganizationDocument,
-  attrs: Record<string, unknown>,
-  subscriptionId: string,
-  custom?: Record<string, string>,
+  subscription: {
+    id: string;
+    status?: string;
+    custom_id?: string;
+    billing_info?: { next_billing_time?: string };
+  },
 ): Promise<void> {
-  const lemonStatus = String(attrs.status ?? "");
-  let status = mapLemonStatus(lemonStatus);
-
-  const endsAt = attrs.ends_at ? new Date(String(attrs.ends_at)) : null;
-  const renewsAt = attrs.renews_at ? new Date(String(attrs.renews_at)) : null;
-  const trialEnds = attrs.trial_ends_at
-    ? new Date(String(attrs.trial_ends_at))
-    : null;
-
-  // Cancelled but still in paid period → keep active until ends_at.
-  if (lemonStatus === "cancelled" && endsAt && endsAt.getTime() > Date.now()) {
-    status = "active";
-  }
-  if (lemonStatus === "cancelled" && endsAt && endsAt.getTime() <= Date.now()) {
-    status = "expired";
-  }
-
-  const planSlug = (custom?.plan_slug ??
-    org.planSlug ??
-    "starter") as PlanSlug;
-  const interval = (custom?.billing_interval ??
+  const decoded = decodePaypalCustomId(subscription.custom_id);
+  const planSlug = (decoded?.planSlug ?? org.planSlug ?? "starter") as PlanSlug;
+  const interval = (decoded?.interval ??
     org.billingInterval ??
     "monthly") as BillingInterval;
+  const paypalStatus = String(subscription.status ?? "ACTIVE");
+  const status = mapPaypalStatus(paypalStatus);
+  const nextBilling = subscription.billing_info?.next_billing_time
+    ? new Date(subscription.billing_info.next_billing_time)
+    : null;
 
-  const urls = (attrs.urls ?? {}) as Record<string, string>;
-  const cardBrand = attrs.card_brand != null ? String(attrs.card_brand) : null;
-  const cardLast4 =
-    attrs.card_last_four != null ? String(attrs.card_last_four) : null;
+  upsertPaymentMethod(org, "PayPal", "0000");
 
-  upsertPaymentMethod(org, cardBrand, cardLast4);
-
-  org.lemonSubscriptionId = subscriptionId;
-  if (attrs.customer_id != null) {
-    org.lemonCustomerId = String(attrs.customer_id);
-  }
-  if (attrs.order_id != null) {
-    org.lemonOrderId = String(attrs.order_id);
-  }
-
+  org.paypalSubscriptionId = subscription.id;
   org.planSlug = planSlug === "free" ? "starter" : planSlug;
   org.plan = planDisplayName(org.planSlug as PlanSlug);
   org.billingInterval = interval;
@@ -386,120 +503,70 @@ async function applySubscriptionAttributes(
   );
   org.currency = "USD";
   org.subscriptionStatus = status;
-  org.autoRenew = !Boolean(attrs.cancelled) && lemonStatus !== "cancelled";
+  org.autoRenew = paypalStatus === "ACTIVE";
   org.autoRenewInterval = org.autoRenew ? interval : null;
-  org.trialEndsAt = trialEnds;
-  org.currentPeriodEndsAt = renewsAt ?? endsAt;
-  org.lemonUpdatePaymentUrl = urls.update_payment_method ?? org.lemonUpdatePaymentUrl;
-  org.lemonCustomerPortalUrl =
-    urls.customer_portal ?? org.lemonCustomerPortalUrl;
+  org.currentPeriodEndsAt = nextBilling;
+  org.lemonCustomerPortalUrl = "https://www.paypal.com/myaccount/autopay/";
+  org.lemonUpdatePaymentUrl = org.lemonCustomerPortalUrl;
   org.lastExpiryReminderDays = null;
   org.lastExpiryReminderAt = null;
 
   await asMutableOrg(org).save();
 }
 
-export async function handleLemonWebhook(
-  payload: LemonWebhookPayload,
+export async function handlePaypalWebhook(
+  payload: PaypalWebhookEvent,
 ): Promise<{ ok: true; event: string }> {
-  const event = payload.meta?.event_name ?? "unknown";
-  const custom = payload.meta?.custom_data;
-  const data = payload.data;
-  if (!data?.attributes) {
+  const event = payload.event_type ?? "unknown";
+  const resourceId = payload.resource?.id ?? "";
+  if (!resourceId) {
     return { ok: true, event };
   }
 
-  const attrs = data.attributes;
-  const resourceType = data.type ?? "";
+  let org = await Organization.findOne({ paypalSubscriptionId: resourceId });
+  const decoded = decodePaypalCustomId(payload.resource?.custom_id);
+  if (!org && decoded?.organizationId) {
+    org = await Organization.findById(decoded.organizationId);
+  }
 
   if (
-    event === "subscription_created" ||
-    event === "subscription_updated" ||
-    event === "subscription_resumed" ||
-    event === "subscription_paused" ||
-    event === "subscription_unpaused" ||
-    event === "subscription_cancelled" ||
-    event === "subscription_expired" ||
-    event === "subscription_payment_success" ||
-    event === "subscription_payment_recovered"
+    event === "BILLING.SUBSCRIPTION.ACTIVATED" ||
+    event === "BILLING.SUBSCRIPTION.UPDATED"
   ) {
-    // subscription_payment_* payloads are subscription-invoice objects.
-    const isInvoice = resourceType === "subscription-invoices";
-    const subscriptionId = isInvoice
-      ? String(attrs.subscription_id ?? "")
-      : String(data.id ?? "");
-
-    if (!subscriptionId) {
-      return { ok: true, event };
-    }
-
-    const org = await findOrgFromWebhook(
-      isInvoice ? { ...attrs, id: subscriptionId } : attrs,
-      custom,
-    );
-
+    const subscription = await getPaypalSubscription(resourceId);
     if (!org) {
-      // Custom data missing on renewals — try lemonSubscriptionId only.
-      const bySub = await Organization.findOne({
-        lemonSubscriptionId: subscriptionId,
-      });
-      if (!bySub) {
-        return { ok: true, event };
-      }
-
-      if (isInvoice) {
-        upsertPaymentMethod(
-          bySub,
-          attrs.card_brand != null ? String(attrs.card_brand) : null,
-          attrs.card_last_four != null ? String(attrs.card_last_four) : null,
-        );
-        if (event === "subscription_payment_success") {
-          bySub.subscriptionStatus = "active";
-          bySub.autoRenew = true;
-        }
-        await asMutableOrg(bySub).save();
-        return { ok: true, event };
-      }
-
-      await applySubscriptionAttributes(bySub, attrs, subscriptionId, custom);
       return { ok: true, event };
     }
-
-    if (isInvoice) {
-      upsertPaymentMethod(
-        org,
-        attrs.card_brand != null ? String(attrs.card_brand) : null,
-        attrs.card_last_four != null ? String(attrs.card_last_four) : null,
-      );
-      if (
-        event === "subscription_payment_success" ||
-        event === "subscription_payment_recovered"
-      ) {
-        org.subscriptionStatus = "active";
-        org.autoRenew = true;
-        if (org.billingInterval) {
-          org.autoRenewInterval = org.billingInterval as BillingInterval;
-        }
-      }
-      await asMutableOrg(org).save();
-      return { ok: true, event };
-    }
-
-    await applySubscriptionAttributes(org, attrs, subscriptionId, custom);
+    await applyPaypalSubscriptionToOrg(org, subscription);
     return { ok: true, event };
   }
 
-  if (event === "subscription_payment_failed") {
-    const subscriptionId = String(attrs.subscription_id ?? data.id ?? "");
-    const org = await findOrgFromWebhook(attrs, custom);
+  if (event === "PAYMENT.SALE.COMPLETED" && org) {
+    org.subscriptionStatus = "active";
+    org.autoRenew = true;
+    await asMutableOrg(org).save();
+    return { ok: true, event };
+  }
+
+  if (
+    event === "BILLING.SUBSCRIPTION.SUSPENDED" ||
+    event === "BILLING.SUBSCRIPTION.PAYMENT.FAILED"
+  ) {
     if (org) {
       org.subscriptionStatus = "pending_payment";
       await asMutableOrg(org).save();
-    } else if (subscriptionId) {
-      await Organization.findOneAndUpdate(
-        { lemonSubscriptionId: subscriptionId },
-        { $set: { subscriptionStatus: "pending_payment" } },
-      );
+    }
+    return { ok: true, event };
+  }
+
+  if (
+    event === "BILLING.SUBSCRIPTION.CANCELLED" ||
+    event === "BILLING.SUBSCRIPTION.EXPIRED"
+  ) {
+    if (org) {
+      org.subscriptionStatus = "expired";
+      org.autoRenew = false;
+      await asMutableOrg(org).save();
     }
     return { ok: true, event };
   }
@@ -507,25 +574,25 @@ export async function handleLemonWebhook(
   return { ok: true, event };
 }
 
-/**
- * Sync auto-renew preference to Lemon (cancel at period end vs resume).
- */
-export async function syncAutoRenewToLemon(
+export async function syncAutoRenewToPaypal(
   org: OrganizationDocument,
   autoRenew: boolean,
 ): Promise<void> {
-  if (!env.lemonSqueezy.configured || !org.lemonSubscriptionId) {
+  if (!env.paypal.configured || !org.paypalSubscriptionId) {
     return;
   }
 
   if (!autoRenew) {
-    // Cancel at period end — Lemon keeps access until renews_at/ends_at.
-    await updateLemonSubscription(org.lemonSubscriptionId, {
-      cancelled: true,
-    });
+    await suspendPaypalSubscription(org.paypalSubscriptionId);
   } else {
-    await updateLemonSubscription(org.lemonSubscriptionId, {
-      cancelled: false,
-    });
+    await activatePaypalSubscription(org.paypalSubscriptionId);
   }
+}
+
+/** @deprecated Lemon path disabled — calls PayPal. */
+export async function syncAutoRenewToLemon(
+  org: OrganizationDocument,
+  autoRenew: boolean,
+): Promise<void> {
+  await syncAutoRenewToPaypal(org, autoRenew);
 }

@@ -41,13 +41,13 @@ export function createApp() {
     }),
   );
 
-  // Capture raw body for Lemon Squeezy webhook HMAC verification.
+  // Capture raw body for PayPal webhook signature verification.
   app.use(
     express.json({
       limit: "1mb",
       verify: (req, _res, buf) => {
         const url = req.url ?? "";
-        if (url.includes("/billing/webhooks/lemonsqueezy")) {
+        if (url.includes("/billing/webhooks/paypal")) {
           (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
         }
       },

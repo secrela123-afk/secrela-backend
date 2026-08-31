@@ -6,4 +6,13 @@ export const createCheckoutBodySchema = z.object({
   interval: z.enum(BILLING_INTERVALS),
 });
 
+export const captureCardBodySchema = z.object({
+  orderId: z
+    .string()
+    .trim()
+    .min(8)
+    .max(64)
+    .regex(/^[A-Z0-9-]+$/i),
+});
+
 export type CreateCheckoutBody = z.infer<typeof createCheckoutBodySchema>;

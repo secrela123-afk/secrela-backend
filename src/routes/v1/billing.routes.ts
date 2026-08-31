@@ -9,14 +9,14 @@ import {
   requirePermission,
 } from "../../middleware/requirePermission.js";
 import { validateBody } from "../../middleware/validateBody.js";
-import { createCheckoutBodySchema } from "../../schemas/billing.schemas.js";
+import { createCheckoutBodySchema, captureCardBodySchema } from "../../schemas/billing.schemas.js";
 
 /**
- * Billing — Lemon Squeezy Merchant of Record.
+ * Billing — PayPal Subscriptions.
  *
- * POST /webhooks/lemonsqueezy — no session (HMAC verified)
+ * POST /webhooks/paypal — no session (PayPal signature verified)
  * GET  /overview — owner/admin billing dashboard data
- * POST /checkout — create hosted checkout URL
+ * POST /checkout — create PayPal approval URL
  */
 export const billingRouter = Router();
 
@@ -34,8 +34,8 @@ const checkoutLimiter = rateLimit({
 });
 
 billingRouter.post(
-  "/webhooks/lemonsqueezy",
-  asyncHandler(billingController.lemonWebhook),
+  "/webhooks/paypal",
+  asyncHandler(billingController.paypalWebhook),
 );
 
 billingRouter.use(requireFullAuth);
@@ -54,4 +54,33 @@ billingRouter.post(
   requirePermission("org.update"),
   validateBody(createCheckoutBodySchema),
   asyncHandler(billingController.createCheckout),
+);
+
+billingRouter.get(
+  "/card/config",
+  requirePermission("org.read"),
+  asyncHandler(billingController.paypalCardConfig),
+);
+
+billingRouter.post(
+  "/card/client-token",
+  checkoutLimiter,
+  requirePermission("org.update"),
+  asyncHandler(billingController.paypalCardClientToken),
+);
+
+billingRouter.post(
+  "/card/orders",
+  checkoutLimiter,
+  requirePermission("org.update"),
+  validateBody(createCheckoutBodySchema),
+  asyncHandler(billingController.createCardOrder),
+);
+
+billingRouter.post(
+  "/card/capture",
+  checkoutLimiter,
+  requirePermission("org.update"),
+  validateBody(captureCardBodySchema),
+  asyncHandler(billingController.captureCardOrder),
 );

@@ -35,17 +35,21 @@ describe("RBAC permission catalog (Owner + Admin system roles)", () => {
     expect(cleaned).toEqual(["vault.read", "org.update", "secret.reveal"]);
   });
 
-  it("ensureCustomRoleBaselinePermissions always adds org.read", async () => {
+  it("ensureCustomRoleBaselinePermissions always adds org.read and access_request.create", async () => {
     const { ensureCustomRoleBaselinePermissions } = await import(
       "../permissions.js"
     );
     expect(ensureCustomRoleBaselinePermissions(["vault.read"])).toEqual([
       "org.read",
       "vault.read",
+      "access_request.create",
     ]);
-    expect(
-      ensureCustomRoleBaselinePermissions(["org.read", "secret.read"]),
-    ).toContain("org.read");
+    const next = ensureCustomRoleBaselinePermissions([
+      "org.read",
+      "secret.read",
+    ]);
+    expect(next).toContain("org.read");
+    expect(next).toContain("access_request.create");
   });
 
   it("clampPermissionsToActor respects actor ceiling", () => {

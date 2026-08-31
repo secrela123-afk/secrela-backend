@@ -1,6 +1,7 @@
 # Secrela API — build on GitHub, then deploy to VPS over SSH.
 # Secrets (repo Settings → Secrets → Actions):
-#   VPS_HOST, VPS_USER, VPS_SSH_KEY  (+ optional VPS_PORT)
+#   VPS_HOST, VPS_USER, VPS_SSH_KEY
+# SSH port is 22 (do not put VPS_PORT in secrets — appleboy requires a real integer).
 name: Deploy API
 
 on:
@@ -47,7 +48,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
+          port: 22
           script_stop: true
           script: |
             set -euo pipefail

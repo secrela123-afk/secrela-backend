@@ -15,4 +15,13 @@ export const captureCardBodySchema = z.object({
     .regex(/^[A-Z0-9-]+$/i),
 });
 
+export const confirmPaddleBodySchema = z.object({
+  transactionId: z
+    .string()
+    .trim()
+    .min(8)
+    .max(80)
+    .regex(/^txn_[a-z0-9]+$/i),
+});
+
 export type CreateCheckoutBody = z.infer<typeof createCheckoutBodySchema>;

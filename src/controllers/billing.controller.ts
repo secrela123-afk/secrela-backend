@@ -2,12 +2,17 @@ import type { Request, Response } from "express";
 import { AppError } from "../lib/errors/AppError.js";
 import {
   captureCardCheckoutForUser,
+  confirmPaddleCheckoutForUser,
   createCardCheckoutOrderForUser,
   createCheckoutSessionForUser,
+  createPaddleCheckoutForUser,
   getBillingOverviewForUser,
+  getPaddleCheckoutConfig,
   getPaypalCardClientToken,
   getPaypalCardSdkConfig,
+  handlePaddleWebhook,
   handlePaypalWebhook,
+  verifyPaddleWebhookRequest,
   verifyPaypalWebhookRequest,
 } from "../services/billing.service.js";
 
@@ -68,6 +73,49 @@ export async function captureCardOrder(req: Request, res: Response) {
     orderId,
   );
   res.status(200).json({ billing });
+}
+
+export async function paddleCardConfig(_req: Request, res: Response) {
+  res.status(200).json(getPaddleCheckoutConfig());
+}
+
+export async function createPaddleCheckout(req: Request, res: Response) {
+  const { planSlug, interval } = req.body as {
+    planSlug: "starter" | "team";
+    interval: "monthly" | "yearly";
+  };
+  const result = await createPaddleCheckoutForUser(
+    requireUserId(req),
+    planSlug,
+    interval,
+  );
+  res.status(200).json(result);
+}
+
+export async function confirmPaddleCheckout(req: Request, res: Response) {
+  const { transactionId } = req.body as { transactionId: string };
+  const billing = await confirmPaddleCheckoutForUser(
+    requireUserId(req),
+    transactionId,
+  );
+  res.status(200).json({ billing });
+}
+
+export async function paddleWebhook(req: Request, res: Response) {
+  const raw =
+    (req as Request & { rawBody?: Buffer }).rawBody?.toString("utf8") ??
+    JSON.stringify(req.body);
+  const ok = verifyPaddleWebhookRequest(
+    req.get("paddle-signature") ?? undefined,
+    raw,
+  );
+  if (!ok) {
+    throw new AppError(401, "Invalid Paddle webhook signature", {
+      code: "WEBHOOK_SIGNATURE_INVALID",
+    });
+  }
+  const result = await handlePaddleWebhook(req.body);
+  res.status(200).json(result);
 }
 
 export async function paypalWebhook(req: Request, res: Response) {

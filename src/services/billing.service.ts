@@ -16,6 +16,15 @@ import {
   verifyPaypalWebhook,
 } from "../lib/paypal.js";
 import {
+  createPaddleTransaction,
+  getPaddleTransaction,
+  paddleGrandTotalCents,
+  paddlePriceIdFor,
+  paddlePublicConfig,
+  type PaddleTransaction,
+  verifyPaddleWebhookSignature,
+} from "../lib/paddle.js";
+import {
   amountCentsForPlan,
   planDisplayName,
   type BillingInterval,
@@ -38,6 +47,7 @@ export type PaymentMethodDto = {
 
 export type BillingOverview = {
   paypalConfigured: boolean;
+  paddleConfigured: boolean;
   planSlug: PlanSlug;
   planLabel: string;
   subscriptionStatus: SubscriptionStatus;
@@ -76,6 +86,7 @@ export function billingOverviewFromOrg(
 ): BillingOverview {
   return {
     paypalConfigured: env.paypal.configured,
+    paddleConfigured: env.paddle.configured,
     planSlug: (org.planSlug ?? "starter") as PlanSlug,
     planLabel: org.plan ?? planDisplayName((org.planSlug ?? "starter") as PlanSlug),
     subscriptionStatus: (org.subscriptionStatus ??
@@ -341,6 +352,138 @@ export async function captureCardCheckoutForUser(
   await asMutableOrg(fresh).save();
 
   return billingOverviewFromOrg(fresh);
+}
+
+export function getPaddleCheckoutConfig() {
+  return paddlePublicConfig();
+}
+
+export async function createPaddleCheckoutForUser(
+  userId: string,
+  planSlug: "starter" | "team",
+  interval: BillingInterval,
+): Promise<{ transactionId: string }> {
+  const { organization } = await requireOwnerOrAdmin(userId);
+  if (!env.paddle.configured) {
+    throw new AppError(
+      503,
+      "Paddle is not configured. Add PADDLE_API_KEY, PADDLE_CLIENT_TOKEN, and PADDLE_PRICE_* ids.",
+      { code: "BILLING_PROVIDER_NOT_CONFIGURED" },
+    );
+  }
+  const priceId = paddlePriceIdFor(planSlug, interval);
+  if (!priceId) {
+    throw new AppError(500, "Missing Paddle price ID for this plan", {
+      code: "PADDLE_PRICE_MISSING",
+    });
+  }
+  return createPaddleTransaction({
+    priceId,
+    organizationId: organization._id.toString(),
+    planSlug,
+    interval,
+  });
+}
+
+async function activateFromPaddleTransaction(
+  organization: OrganizationDocument,
+  txn: PaddleTransaction,
+): Promise<BillingOverview> {
+  const custom = txn.custom_data ?? {};
+  const organizationId = custom.organizationId ?? "";
+  const planSlug = custom.planSlug;
+  const interval = custom.interval;
+  if (organizationId !== organization._id.toString()) {
+    throw new AppError(403, "Payment does not match this workspace", {
+      code: "PADDLE_TRANSACTION_MISMATCH",
+    });
+  }
+  if (planSlug !== "starter" && planSlug !== "team") {
+    throw new AppError(400, "Invalid paid plan on this transaction", {
+      code: "INVALID_PLAN",
+    });
+  }
+  if (interval !== "monthly" && interval !== "yearly") {
+    throw new AppError(400, "Invalid billing interval on this transaction", {
+      code: "INVALID_INTERVAL",
+    });
+  }
+  const expectedCents = amountCentsForPlan(planSlug, interval);
+  const paidCents = paddleGrandTotalCents(txn);
+  const amountOk =
+    expectedCents != null &&
+    paidCents != null &&
+    (paidCents === expectedCents || Math.round(paidCents * 100) === expectedCents);
+  if (!amountOk) {
+    throw new AppError(402, "Paid amount does not match the selected plan", {
+      code: "PADDLE_AMOUNT_MISMATCH",
+    });
+  }
+  const status = (txn.status ?? "").toLowerCase();
+  if (status !== "completed" && status !== "paid" && status !== "billed") {
+    throw new AppError(402, "Paddle payment was not completed", {
+      code: "PADDLE_PAYMENT_INCOMPLETE",
+    });
+  }
+
+  await activateOrganizationSubscription(organization, planSlug, interval);
+  const fresh = await Organization.findById(organization._id);
+  if (!fresh) {
+    throw new AppError(404, "Organization no longer exists", {
+      code: "ORGANIZATION_NOT_FOUND",
+    });
+  }
+  fresh.autoRenew = false;
+  const card = txn.payments?.[0]?.method_details?.card;
+  upsertPaymentMethod(fresh, card?.type ?? "card", card?.last4);
+  await asMutableOrg(fresh).save();
+  return billingOverviewFromOrg(fresh);
+}
+
+export async function confirmPaddleCheckoutForUser(
+  userId: string,
+  transactionId: string,
+): Promise<BillingOverview> {
+  const { organization } = await requireOwnerOrAdmin(userId);
+  const txn = await getPaddleTransaction(transactionId);
+  return activateFromPaddleTransaction(organization, txn);
+}
+
+export function verifyPaddleWebhookRequest(
+  signatureHeader: string | undefined,
+  rawBody: string,
+): boolean {
+  return verifyPaddleWebhookSignature(rawBody, signatureHeader);
+}
+
+export async function handlePaddleWebhook(event: {
+  event_type?: string;
+  data?: PaddleTransaction;
+}): Promise<{ received: true }> {
+  const type = event.event_type ?? "";
+  if (
+    type !== "transaction.completed" &&
+    type !== "transaction.paid" &&
+    type !== "transaction.updated"
+  ) {
+    return { received: true };
+  }
+  const txn = event.data;
+  if (!txn?.id) return { received: true };
+  const organizationId = txn.custom_data?.organizationId;
+  if (!organizationId) return { received: true };
+  const org = await Organization.findById(organizationId);
+  if (!org) return { received: true };
+  const status = (txn.status ?? "").toLowerCase();
+  if (status !== "completed" && status !== "paid" && status !== "billed") {
+    return { received: true };
+  }
+  try {
+    await activateFromPaddleTransaction(org, txn);
+  } catch {
+    // Signature already verified; ignore amount/status races from duplicate events.
+  }
+  return { received: true };
 }
 
 /** Plain card row — InferSchemaType marks paymentMethods as DocumentArray. */

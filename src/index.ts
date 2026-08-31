@@ -24,6 +24,13 @@ async function main() {
           : "DISABLED (missing client or plan ids)"
       }`,
     );
+    console.log(
+      `[securevault-api] paddle: ${
+        env.paddle.configured
+          ? `enabled (${env.paddle.mode})`
+          : "DISABLED (missing api key, client token, or price ids)"
+      }`,
+    );
     const mongoHost = env.mongodbUri.includes("127.0.0.1")
       ? "local"
       : "remote";

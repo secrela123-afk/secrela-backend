@@ -47,7 +47,10 @@ export function createApp() {
       limit: "1mb",
       verify: (req, _res, buf) => {
         const url = req.url ?? "";
-        if (url.includes("/billing/webhooks/paypal")) {
+        if (
+          url.includes("/billing/webhooks/paypal") ||
+          url.includes("/billing/webhooks/paddle")
+        ) {
           (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
         }
       },

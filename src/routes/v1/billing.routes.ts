@@ -9,7 +9,7 @@ import {
   requirePermission,
 } from "../../middleware/requirePermission.js";
 import { validateBody } from "../../middleware/validateBody.js";
-import { createCheckoutBodySchema, captureCardBodySchema } from "../../schemas/billing.schemas.js";
+import { createCheckoutBodySchema, captureCardBodySchema, confirmPaddleBodySchema } from "../../schemas/billing.schemas.js";
 
 /**
  * Billing — PayPal Subscriptions.
@@ -36,6 +36,16 @@ const checkoutLimiter = rateLimit({
 billingRouter.post(
   "/webhooks/paypal",
   asyncHandler(billingController.paypalWebhook),
+);
+
+billingRouter.post(
+  "/webhooks/paddle",
+  asyncHandler(billingController.paddleWebhook),
+);
+
+billingRouter.get(
+  "/paddle/config",
+  asyncHandler(billingController.paddleCardConfig),
 );
 
 billingRouter.use(requireFullAuth);
@@ -83,4 +93,20 @@ billingRouter.post(
   requirePermission("org.update"),
   validateBody(captureCardBodySchema),
   asyncHandler(billingController.captureCardOrder),
+);
+
+billingRouter.post(
+  "/paddle/checkout",
+  checkoutLimiter,
+  requirePermission("org.update"),
+  validateBody(createCheckoutBodySchema),
+  asyncHandler(billingController.createPaddleCheckout),
+);
+
+billingRouter.post(
+  "/paddle/confirm",
+  checkoutLimiter,
+  requirePermission("org.update"),
+  validateBody(confirmPaddleBodySchema),
+  asyncHandler(billingController.confirmPaddleCheckout),
 );

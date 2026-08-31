@@ -316,6 +316,38 @@ export const env = {
     };
   })(),
   /**
+   * Paddle Billing — card overlay (no PayPal account). PayPal stays the other option.
+   * Sandbox dashboard: https://sandbox-vendors.paddle.com
+   */
+  paddle: (() => {
+    const apiKey = process.env.PADDLE_API_KEY?.trim() ?? "";
+    const clientToken = process.env.PADDLE_CLIENT_TOKEN?.trim() ?? "";
+    const modeRaw = (process.env.PADDLE_MODE ?? "sandbox").toLowerCase();
+    const mode: "sandbox" | "live" = modeRaw === "live" ? "live" : "sandbox";
+    const prices = {
+      starterMonthly: process.env.PADDLE_PRICE_STARTER_MONTHLY?.trim() ?? "",
+      starterYearly: process.env.PADDLE_PRICE_STARTER_YEARLY?.trim() ?? "",
+      teamMonthly: process.env.PADDLE_PRICE_TEAM_MONTHLY?.trim() ?? "",
+      teamYearly: process.env.PADDLE_PRICE_TEAM_YEARLY?.trim() ?? "",
+    };
+    const configured = Boolean(
+      apiKey &&
+        clientToken &&
+        prices.starterMonthly &&
+        prices.starterYearly &&
+        prices.teamMonthly &&
+        prices.teamYearly,
+    );
+    return {
+      configured,
+      apiKey,
+      clientToken,
+      mode,
+      webhookSecret: process.env.PADDLE_WEBHOOK_SECRET?.trim() ?? "",
+      prices,
+    };
+  })(),
+  /**
    * Trust X-Forwarded-For / X-Real-IP only behind a known reverse proxy.
    * Default: true in production, false in development (avoids spoofing).
    */

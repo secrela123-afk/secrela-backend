@@ -8,6 +8,7 @@
  */
 import { env } from "../config/env.js";
 import { AppError } from "./errors/AppError.js";
+import type { BillingInterval, PaidPlanSlug } from "./subscriptionPlans.js";
 
 const API_BASE = "https://api.lemonsqueezy.com/v1";
 
@@ -155,12 +156,14 @@ export async function updateLemonSubscription(
 }
 
 export function variantIdForPlan(
-  planSlug: "starter" | "team",
-  interval: "monthly" | "yearly",
+  planSlug: PaidPlanSlug,
+  interval: BillingInterval,
 ): string {
   const v = env.lemonSqueezy.variants;
-  if (planSlug === "starter" && interval === "monthly") return v.starterMonthly;
-  if (planSlug === "starter" && interval === "yearly") return v.starterYearly;
-  if (planSlug === "team" && interval === "monthly") return v.teamMonthly;
-  return v.teamYearly;
+  const byPlan = {
+    starter: { monthly: v.starterMonthly, yearly: v.starterYearly },
+    team: { monthly: v.teamMonthly, yearly: v.teamYearly },
+    business: { monthly: v.businessMonthly, yearly: v.businessYearly },
+  } as const;
+  return byPlan[planSlug][interval];
 }

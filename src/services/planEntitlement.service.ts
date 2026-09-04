@@ -41,7 +41,7 @@ export type PlanEntitlementSnapshot = {
     viewSecurityCenter: boolean;
     viewIntegrations: boolean;
   };
-  upgradePlanSlug: PlanSlug | "enterprise" | null;
+  upgradePlanSlug: PlanSlug | null;
   upgradePlanLabel: string | null;
 };
 
@@ -76,7 +76,7 @@ function featureMessage(
   const upgrade = recommendedUpgradeForFeature(planSlug, feature);
   const suffix = upgrade
     ? ` Upgrade to ${upgradePlanLabel(upgrade)} to unlock this feature.`
-    : " Contact sales for Enterprise access.";
+    : " View plans if you need a higher tier.";
   const labels: Record<PlanFeature, string> = {
     auditLogs: "Audit logs",
     customRoles: "Custom roles",

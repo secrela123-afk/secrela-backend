@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import type { BillingInterval, PaidPlanSlug } from "../lib/subscriptionPlans.js";
 import { AppError } from "../lib/errors/AppError.js";
 import {
   captureCardCheckoutForUser,
@@ -31,8 +32,8 @@ export async function billingOverview(req: Request, res: Response) {
 
 export async function createCheckout(req: Request, res: Response) {
   const { planSlug, interval } = req.body as {
-    planSlug: "starter" | "team";
-    interval: "monthly" | "yearly";
+    planSlug: PaidPlanSlug;
+    interval: BillingInterval;
   };
   const result = await createCheckoutSessionForUser(
     requireUserId(req),
@@ -55,8 +56,8 @@ export async function paypalCardClientToken(req: Request, res: Response) {
 
 export async function createCardOrder(req: Request, res: Response) {
   const { planSlug, interval } = req.body as {
-    planSlug: "starter" | "team";
-    interval: "monthly" | "yearly";
+    planSlug: PaidPlanSlug;
+    interval: BillingInterval;
   };
   const result = await createCardCheckoutOrderForUser(
     requireUserId(req),
@@ -81,8 +82,8 @@ export async function paddleCardConfig(_req: Request, res: Response) {
 
 export async function createPaddleCheckout(req: Request, res: Response) {
   const { planSlug, interval } = req.body as {
-    planSlug: "starter" | "team";
-    interval: "monthly" | "yearly";
+    planSlug: PaidPlanSlug;
+    interval: BillingInterval;
   };
   const result = await createPaddleCheckoutForUser(
     requireUserId(req),

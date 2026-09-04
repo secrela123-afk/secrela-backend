@@ -3,6 +3,7 @@
  * PayPal account that owns PAYPAL_CLIENT_ID (sandbox or live from env).
  */
 import { env } from "../src/config/env.js";
+import { PLAN_PRICES_USD_CENTS } from "../src/lib/subscriptionPlans.js";
 
 type PaypalError = {
   name?: string;
@@ -122,20 +123,40 @@ async function main() {
   const starterMonthly = await createPlan(
     "Starter Monthly",
     "MONTH",
-    money(2800),
+    money(PLAN_PRICES_USD_CENTS.starter.monthly),
   );
   const starterYearly = await createPlan(
     "Starter Yearly",
     "YEAR",
-    money(26400),
+    money(PLAN_PRICES_USD_CENTS.starter.yearlyTotal),
   );
-  const teamMonthly = await createPlan("Team Monthly", "MONTH", money(3600));
-  const teamYearly = await createPlan("Team Yearly", "YEAR", money(34800));
+  const teamMonthly = await createPlan(
+    "Team Monthly",
+    "MONTH",
+    money(PLAN_PRICES_USD_CENTS.team.monthly),
+  );
+  const teamYearly = await createPlan(
+    "Team Yearly",
+    "YEAR",
+    money(PLAN_PRICES_USD_CENTS.team.yearlyTotal),
+  );
+  const businessMonthly = await createPlan(
+    "Business Monthly",
+    "MONTH",
+    money(PLAN_PRICES_USD_CENTS.business.monthly),
+  );
+  const businessYearly = await createPlan(
+    "Business Yearly",
+    "YEAR",
+    money(PLAN_PRICES_USD_CENTS.business.yearlyTotal),
+  );
 
   console.log("PAYPAL_PLAN_STARTER_MONTHLY=" + starterMonthly);
   console.log("PAYPAL_PLAN_STARTER_YEARLY=" + starterYearly);
   console.log("PAYPAL_PLAN_TEAM_MONTHLY=" + teamMonthly);
   console.log("PAYPAL_PLAN_TEAM_YEARLY=" + teamYearly);
+  console.log("PAYPAL_PLAN_BUSINESS_MONTHLY=" + businessMonthly);
+  console.log("PAYPAL_PLAN_BUSINESS_YEARLY=" + businessYearly);
 }
 
 main().catch((err) => {

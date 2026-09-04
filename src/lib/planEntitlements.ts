@@ -17,7 +17,7 @@ export type PlanEntitlements = {
 
 /**
  * Source of truth — must match landing pricing (`LandingPricing.tsx`).
- * Backend slugs: free | starter | team | enterprise
+ * Backend slugs: free | starter | team | business | enterprise (legacy)
  */
 export const PLAN_ENTITLEMENTS: Record<PlanSlug, PlanEntitlements> = {
   free: {
@@ -42,6 +42,16 @@ export const PLAN_ENTITLEMENTS: Record<PlanSlug, PlanEntitlements> = {
   },
   team: {
     maxMembers: 10,
+    maxVaults: null,
+    maxSecrets: null,
+    auditLogAccess: true,
+    auditRetentionDays: null,
+    customRoles: true,
+    securityCenter: true,
+    integrations: true,
+  },
+  business: {
+    maxMembers: 25,
     maxVaults: null,
     maxSecrets: null,
     auditLogAccess: true,
@@ -75,7 +85,12 @@ export type PlanFeature =
   | "integrations";
 
 export function resolvePlanSlug(raw: string | null | undefined): PlanSlug {
-  if (raw === "starter" || raw === "team" || raw === "enterprise") {
+  if (
+    raw === "starter" ||
+    raw === "team" ||
+    raw === "business" ||
+    raw === "enterprise"
+  ) {
     return raw;
   }
   return "free";
@@ -86,12 +101,10 @@ export function getPlanEntitlements(planSlug: PlanSlug): PlanEntitlements {
 }
 
 /** Next paid tier for generic limit upgrades (members, vaults, secrets). */
-export function recommendedUpgradePlan(
-  planSlug: PlanSlug,
-): PlanSlug | "enterprise" | null {
+export function recommendedUpgradePlan(planSlug: PlanSlug): PlanSlug | null {
   if (planSlug === "free") return "starter";
   if (planSlug === "starter") return "team";
-  if (planSlug === "team") return "enterprise";
+  if (planSlug === "team") return "business";
   return null;
 }
 
@@ -99,7 +112,7 @@ export function recommendedUpgradePlan(
 export function recommendedUpgradeForFeature(
   planSlug: PlanSlug,
   feature: PlanFeature,
-): PlanSlug | "enterprise" | null {
+): PlanSlug | null {
   if (feature === "securityCenter" || feature === "integrations") {
     if (planSlug === "free" || planSlug === "starter") return "team";
     return null;
@@ -107,10 +120,7 @@ export function recommendedUpgradeForFeature(
   return recommendedUpgradePlan(planSlug);
 }
 
-export function upgradePlanLabel(
-  target: PlanSlug | "enterprise",
-): string {
-  if (target === "enterprise") return "Enterprise";
+export function upgradePlanLabel(target: PlanSlug): string {
   return planDisplayName(target);
 }
 

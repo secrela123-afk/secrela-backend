@@ -257,6 +257,10 @@ export const env = {
         process.env.LEMON_SQUEEZY_VARIANT_STARTER_YEARLY?.trim() ?? "",
       teamMonthly: process.env.LEMON_SQUEEZY_VARIANT_TEAM_MONTHLY?.trim() ?? "",
       teamYearly: process.env.LEMON_SQUEEZY_VARIANT_TEAM_YEARLY?.trim() ?? "",
+      businessMonthly:
+        process.env.LEMON_SQUEEZY_VARIANT_BUSINESS_MONTHLY?.trim() ?? "",
+      businessYearly:
+        process.env.LEMON_SQUEEZY_VARIANT_BUSINESS_YEARLY?.trim() ?? "",
     };
     const configured = Boolean(
       apiKey &&
@@ -293,6 +297,8 @@ export const env = {
       starterYearly: process.env.PAYPAL_PLAN_STARTER_YEARLY?.trim() ?? "",
       teamMonthly: process.env.PAYPAL_PLAN_TEAM_MONTHLY?.trim() ?? "",
       teamYearly: process.env.PAYPAL_PLAN_TEAM_YEARLY?.trim() ?? "",
+      businessMonthly: process.env.PAYPAL_PLAN_BUSINESS_MONTHLY?.trim() ?? "",
+      businessYearly: process.env.PAYPAL_PLAN_BUSINESS_YEARLY?.trim() ?? "",
     };
     const configured = Boolean(
       clientId &&
@@ -329,6 +335,8 @@ export const env = {
       starterYearly: process.env.PADDLE_PRICE_STARTER_YEARLY?.trim() ?? "",
       teamMonthly: process.env.PADDLE_PRICE_TEAM_MONTHLY?.trim() ?? "",
       teamYearly: process.env.PADDLE_PRICE_TEAM_YEARLY?.trim() ?? "",
+      businessMonthly: process.env.PADDLE_PRICE_BUSINESS_MONTHLY?.trim() ?? "",
+      businessYearly: process.env.PADDLE_PRICE_BUSINESS_YEARLY?.trim() ?? "",
     };
     const configured = Boolean(
       apiKey &&

@@ -39,7 +39,15 @@ describe("planEntitlements", () => {
     expect(e.auditRetentionDays).toBeNull();
   });
 
-  it("enterprise is unlimited", () => {
+  it("business tier allows 25 members with Team security features", () => {
+    const e = getPlanEntitlements("business");
+    expect(e.maxMembers).toBe(25);
+    expect(e.securityCenter).toBe(true);
+    expect(e.integrations).toBe(true);
+    expect(e.auditRetentionDays).toBeNull();
+  });
+
+  it("enterprise is unlimited (legacy / sales)", () => {
     const e = getPlanEntitlements("enterprise");
     expect(e.maxMembers).toBeNull();
     expect(e.maxVaults).toBeNull();
@@ -55,12 +63,19 @@ describe("planEntitlements", () => {
   it("suggests upgrade path", () => {
     expect(recommendedUpgradePlan("free")).toBe("starter");
     expect(recommendedUpgradePlan("starter")).toBe("team");
-    expect(recommendedUpgradePlan("team")).toBe("enterprise");
+    expect(recommendedUpgradePlan("team")).toBe("business");
+    expect(recommendedUpgradePlan("business")).toBeNull();
     expect(recommendedUpgradePlan("enterprise")).toBeNull();
   });
 
   it("defines all plan slugs", () => {
-    for (const slug of ["free", "starter", "team", "enterprise"] as const) {
+    for (const slug of [
+      "free",
+      "starter",
+      "team",
+      "business",
+      "enterprise",
+    ] as const) {
       expect(PLAN_ENTITLEMENTS[slug]).toBeDefined();
     }
   });
@@ -74,6 +89,7 @@ describe("planEntitlements", () => {
       sevenDaysMs - 5000,
     );
     expect(auditRetentionCutoff(getPlanEntitlements("team"))).toBeNull();
+    expect(auditRetentionCutoff(getPlanEntitlements("business"))).toBeNull();
     expect(auditRetentionCutoff(getPlanEntitlements("enterprise"))).toBeNull();
   });
 });

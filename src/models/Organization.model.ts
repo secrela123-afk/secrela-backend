@@ -52,7 +52,7 @@ const organizationSchema = new Schema(
     },
     planSlug: {
       type: String,
-      enum: ["free", "starter", "team", "enterprise"],
+      enum: ["free", "starter", "team", "business", "enterprise"],
       default: "starter",
     },
     subscriptionStatus: {

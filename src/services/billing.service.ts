@@ -26,8 +26,10 @@ import {
 } from "../lib/paddle.js";
 import {
   amountCentsForPlan,
+  isPaidPlanSlug,
   planDisplayName,
   type BillingInterval,
+  type PaidPlanSlug,
   type PlanSlug,
   type SubscriptionStatus,
 } from "../lib/subscriptionPlans.js";
@@ -126,7 +128,7 @@ export async function getBillingOverviewForUser(
  */
 export async function createCheckoutSessionForUser(
   userId: string,
-  planSlug: "starter" | "team",
+  planSlug: PaidPlanSlug,
   interval: BillingInterval,
 ): Promise<{ checkoutUrl: string; mockActivated?: boolean }> {
   const { membership, resolved } = await loadMembershipContext(userId);
@@ -247,7 +249,7 @@ function usdValueFromCents(cents: number): string {
 
 export async function createCardCheckoutOrderForUser(
   userId: string,
-  planSlug: "starter" | "team",
+  planSlug: PaidPlanSlug,
   interval: BillingInterval,
 ): Promise<{ orderId: string; amount: string; currency: string }> {
   const { organization } = await requireOwnerOrAdmin(userId);
@@ -306,7 +308,7 @@ export async function captureCardCheckoutForUser(
       code: "PAYPAL_ORDER_MISMATCH",
     });
   }
-  if (decoded.planSlug !== "starter" && decoded.planSlug !== "team") {
+  if (!isPaidPlanSlug(decoded.planSlug)) {
     throw new AppError(400, "Invalid paid plan on this order", {
       code: "INVALID_PLAN",
     });
@@ -360,7 +362,7 @@ export function getPaddleCheckoutConfig() {
 
 export async function createPaddleCheckoutForUser(
   userId: string,
-  planSlug: "starter" | "team",
+  planSlug: PaidPlanSlug,
   interval: BillingInterval,
 ): Promise<{ transactionId: string }> {
   const { organization } = await requireOwnerOrAdmin(userId);
@@ -398,7 +400,7 @@ async function activateFromPaddleTransaction(
       code: "PADDLE_TRANSACTION_MISMATCH",
     });
   }
-  if (planSlug !== "starter" && planSlug !== "team") {
+  if (!isPaidPlanSlug(planSlug)) {
     throw new AppError(400, "Invalid paid plan on this transaction", {
       code: "INVALID_PLAN",
     });

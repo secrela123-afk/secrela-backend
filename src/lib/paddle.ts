@@ -5,6 +5,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { env } from "../config/env.js";
 import { AppError } from "./errors/AppError.js";
+import type { BillingInterval, PaidPlanSlug } from "./subscriptionPlans.js";
 
 function apiBase(): string {
   return env.paddle.mode === "live"
@@ -16,21 +17,23 @@ function requireConfigured(): void {
   if (!env.paddle.configured) {
     throw new AppError(
       503,
-      "Paddle is not configured. Set PADDLE_API_KEY, PADDLE_CLIENT_TOKEN, and the four PADDLE_PRICE_* ids.",
+      "Paddle is not configured. Set PADDLE_API_KEY, PADDLE_CLIENT_TOKEN, and PADDLE_PRICE_* ids.",
       { code: "BILLING_PROVIDER_NOT_CONFIGURED" },
     );
   }
 }
 
 export function paddlePriceIdFor(
-  planSlug: "starter" | "team",
-  interval: "monthly" | "yearly",
+  planSlug: PaidPlanSlug,
+  interval: BillingInterval,
 ): string {
   const p = env.paddle.prices;
-  if (planSlug === "starter" && interval === "monthly") return p.starterMonthly;
-  if (planSlug === "starter" && interval === "yearly") return p.starterYearly;
-  if (planSlug === "team" && interval === "monthly") return p.teamMonthly;
-  return p.teamYearly;
+  const byPlan = {
+    starter: { monthly: p.starterMonthly, yearly: p.starterYearly },
+    team: { monthly: p.teamMonthly, yearly: p.teamYearly },
+    business: { monthly: p.businessMonthly, yearly: p.businessYearly },
+  } as const;
+  return byPlan[planSlug][interval];
 }
 
 export function paddlePublicConfig(): {

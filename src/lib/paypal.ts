@@ -7,6 +7,7 @@
  */
 import { env } from "../config/env.js";
 import { AppError } from "./errors/AppError.js";
+import type { BillingInterval, PaidPlanSlug } from "./subscriptionPlans.js";
 
 type PaypalLink = { href: string; rel: string; method?: string };
 
@@ -142,14 +143,16 @@ async function paypalRequest<T>(
 }
 
 export function paypalPlanIdFor(
-  planSlug: "starter" | "team",
-  interval: "monthly" | "yearly",
+  planSlug: PaidPlanSlug,
+  interval: BillingInterval,
 ): string {
   const p = env.paypal.plans;
-  if (planSlug === "starter" && interval === "monthly") return p.starterMonthly;
-  if (planSlug === "starter" && interval === "yearly") return p.starterYearly;
-  if (planSlug === "team" && interval === "monthly") return p.teamMonthly;
-  return p.teamYearly;
+  const byPlan = {
+    starter: { monthly: p.starterMonthly, yearly: p.starterYearly },
+    team: { monthly: p.teamMonthly, yearly: p.teamYearly },
+    business: { monthly: p.businessMonthly, yearly: p.businessYearly },
+  } as const;
+  return byPlan[planSlug][interval];
 }
 
 export function encodePaypalCustomId(

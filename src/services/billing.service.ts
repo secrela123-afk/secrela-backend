@@ -181,28 +181,39 @@ export async function createCheckoutSessionForUser(
 
   const variantId = variantIdForPlan(planSlug, interval);
   if (!variantId) {
-    throw new AppError(500, "Missing Lemon Squeezy variant ID for this plan", {
-      code: "LEMON_VARIANT_MISSING",
-    });
+    throw new AppError(
+      503,
+      `Missing Lemon Squeezy variant ID for ${planSlug}/${interval}. Set LEMON_SQUEEZY_VARIANT_* on the server.`,
+      { code: "LEMON_VARIANT_MISSING" },
+    );
   }
 
   const redirectUrl = `${env.appOrigin}/app/billing?checkout=success`;
   const { checkoutUrl, checkoutId } = await createLemonCheckout({
     variantId,
-    email: user.email,
-    name: user.name,
+    email: user.email ?? "",
+    name: user.name ?? "",
     custom: {
       organizationId: organization._id.toString(),
-      planSlug,
-      interval,
+      planSlug: String(planSlug),
+      interval: String(interval),
     },
     redirectUrl,
   });
 
-  organization.pendingLemonCheckoutId = checkoutId;
-  organization.pendingLemonPlanSlug = planSlug;
-  organization.pendingLemonInterval = interval;
-  await asMutableOrg(organization).save();
+  try {
+    organization.pendingLemonCheckoutId = checkoutId;
+    organization.pendingLemonPlanSlug = planSlug;
+    organization.pendingLemonInterval = interval;
+    await asMutableOrg(organization).save();
+  } catch (err) {
+    console.error("[securevault-api] failed to save pending Lemon checkout:", err);
+    throw new AppError(
+      500,
+      "Checkout was created but could not be saved. Try again.",
+      { code: "LEMON_CHECKOUT_SAVE_FAILED" },
+    );
+  }
 
   return { checkoutUrl };
 }

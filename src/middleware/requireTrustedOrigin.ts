@@ -30,7 +30,8 @@ export function requireTrustedOrigin(
     if (
       req.method.toUpperCase() === "POST" &&
       (path.endsWith("/billing/webhooks/paypal") ||
-        path.endsWith("/billing/webhooks/paddle"))
+        path.endsWith("/billing/webhooks/paddle") ||
+        path.endsWith("/billing/webhooks/lemonsqueezy"))
     ) {
       next();
       return;

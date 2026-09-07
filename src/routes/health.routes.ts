@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { env } from "../config/env.js";
 import {
   getDatabaseStatus,
   isDatabaseConnected,
@@ -17,6 +18,9 @@ healthRouter.get("/", (_req, res) => {
     database: {
       status: getDatabaseStatus(),
     },
+    billing: {
+      lemonConfigured: env.lemonSqueezy.configured,
+    },
   });
 });
 
@@ -33,6 +37,9 @@ healthRouter.get("/ready", (_req, res) => {
     service: "securevault-api",
     database: {
       status: databaseStatus,
+    },
+    billing: {
+      lemonConfigured: env.lemonSqueezy.configured,
     },
   });
 });

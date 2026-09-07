@@ -32,6 +32,19 @@ function requireConfigured(): void {
   }
 }
 
+function lemonErrorDetail(json: unknown): string | null {
+  if (!json || typeof json !== "object") return null;
+  const errors = (json as { errors?: unknown }).errors;
+  if (!Array.isArray(errors) || errors.length === 0) return null;
+  const first = errors[0];
+  if (!first || typeof first !== "object") return null;
+  const detail = (first as { detail?: unknown; title?: unknown }).detail;
+  const title = (first as { detail?: unknown; title?: unknown }).title;
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (typeof title === "string" && title.trim()) return title.trim();
+  return null;
+}
+
 async function lemonFetch(
   method: string,
   path: string,
@@ -39,15 +52,25 @@ async function lemonFetch(
 ): Promise<unknown> {
   requireConfigured();
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers: {
-      Accept: "application/vnd.api+json",
-      "Content-Type": "application/vnd.api+json",
-      Authorization: `Bearer ${env.lemonSqueezy.apiKey}`,
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers: {
+        Accept: "application/vnd.api+json",
+        "Content-Type": "application/vnd.api+json",
+        Authorization: `Bearer ${env.lemonSqueezy.apiKey}`,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (err) {
+    console.error("[securevault-api] lemon fetch failed:", err);
+    throw new AppError(
+      502,
+      "Could not reach Lemon Squeezy from the server. Check outbound HTTPS and API key.",
+      { code: "LEMON_SQUEEZY_NETWORK_ERROR" },
+    );
+  }
 
   const text = await res.text();
   let json: unknown = {};
@@ -58,9 +81,12 @@ async function lemonFetch(
   }
 
   if (!res.ok) {
+    const detail = lemonErrorDetail(json);
     throw new AppError(
       502,
-      `Lemon Squeezy request failed (${res.status}). Check API key and variant IDs.`,
+      detail
+        ? `Lemon Squeezy: ${detail}`
+        : `Lemon Squeezy request failed (${res.status}). Check API key, store id, and variant IDs on the server.`,
       { code: "LEMON_SQUEEZY_API_ERROR" },
     );
   }
@@ -130,14 +156,16 @@ export async function createLemonCheckout(input: CreateCheckoutInput): Promise<{
   };
 
   const result = await lemonRequest("POST", "/checkouts", payload);
-  const url = String(result.data.attributes.url ?? "");
-  if (!url) {
+  const data = result?.data;
+  const attrs = data?.attributes;
+  const url = attrs && typeof attrs.url === "string" ? attrs.url.trim() : "";
+  if (!data?.id || !url) {
     throw new AppError(502, "Lemon Squeezy did not return a checkout URL", {
       code: "LEMON_SQUEEZY_CHECKOUT_MISSING",
     });
   }
 
-  return { checkoutUrl: url, checkoutId: result.data.id };
+  return { checkoutUrl: url, checkoutId: String(data.id) };
 }
 
 /** Pause / cancel / resume via Lemon Subscriptions API. */

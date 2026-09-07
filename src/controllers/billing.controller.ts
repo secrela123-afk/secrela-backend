@@ -11,8 +11,11 @@ import {
   getPaddleCheckoutConfig,
   getPaypalCardClientToken,
   getPaypalCardSdkConfig,
+  handleLemonWebhook,
   handlePaddleWebhook,
   handlePaypalWebhook,
+  syncLemonSubscriptionForUser,
+  verifyLemonWebhookRequest,
   verifyPaddleWebhookRequest,
   verifyPaypalWebhookRequest,
 } from "../services/billing.service.js";
@@ -27,6 +30,11 @@ function requireUserId(req: Request): string {
 
 export async function billingOverview(req: Request, res: Response) {
   const billing = await getBillingOverviewForUser(requireUserId(req));
+  res.status(200).json({ billing });
+}
+
+export async function syncCheckout(req: Request, res: Response) {
+  const billing = await syncLemonSubscriptionForUser(requireUserId(req));
   res.status(200).json({ billing });
 }
 
@@ -100,6 +108,20 @@ export async function confirmPaddleCheckout(req: Request, res: Response) {
     transactionId,
   );
   res.status(200).json({ billing });
+}
+
+export async function lemonWebhook(req: Request, res: Response) {
+  const raw =
+    (req as Request & { rawBody?: Buffer }).rawBody?.toString("utf8") ??
+    JSON.stringify(req.body);
+  const ok = verifyLemonWebhookRequest(req.get("x-signature") ?? undefined, raw);
+  if (!ok) {
+    throw new AppError(401, "Invalid Lemon Squeezy webhook signature", {
+      code: "WEBHOOK_SIGNATURE_INVALID",
+    });
+  }
+  const result = await handleLemonWebhook(req.body);
+  res.status(200).json(result);
 }
 
 export async function paddleWebhook(req: Request, res: Response) {

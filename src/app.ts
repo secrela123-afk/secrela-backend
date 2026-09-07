@@ -49,7 +49,8 @@ export function createApp() {
         const url = req.url ?? "";
         if (
           url.includes("/billing/webhooks/paypal") ||
-          url.includes("/billing/webhooks/paddle")
+          url.includes("/billing/webhooks/paddle") ||
+          url.includes("/billing/webhooks/lemonsqueezy")
         ) {
           (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
         }

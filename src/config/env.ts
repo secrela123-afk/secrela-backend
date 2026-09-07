@@ -241,9 +241,8 @@ export const env = {
     redirectUri: googleRedirectUri,
   },
   /**
-   * Lemon Squeezy (Merchant of Record).
-   * When apiKey + storeId + variant IDs are set, checkout uses real card payments.
-   * Recurring billing is handled by Lemon; we sync via webhooks.
+   * Lemon Squeezy (Merchant of Record) — current checkout provider.
+   * PayPal and Paddle env blocks below are unused until those routes are restored.
    */
   lemonSqueezy: (() => {
     const apiKey = process.env.LEMON_SQUEEZY_API_KEY?.trim() ?? "";

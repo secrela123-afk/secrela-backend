@@ -173,6 +173,26 @@ const organizationSchema = new Schema(
       default: null,
       trim: true,
       maxlength: 64,
+      index: true,
+    },
+    /** Last hosted checkout — used if the webhook arrives without custom_data. */
+    pendingLemonCheckoutId: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 64,
+    },
+    pendingLemonPlanSlug: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 32,
+    },
+    pendingLemonInterval: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 16,
     },
     /** Current payment method on the active subscription (display only). */
     cardBrand: {

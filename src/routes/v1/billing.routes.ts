@@ -9,14 +9,14 @@ import {
   requirePermission,
 } from "../../middleware/requirePermission.js";
 import { validateBody } from "../../middleware/validateBody.js";
-import { createCheckoutBodySchema, captureCardBodySchema, confirmPaddleBodySchema } from "../../schemas/billing.schemas.js";
+import { createCheckoutBodySchema } from "../../schemas/billing.schemas.js";
 
 /**
- * Billing — PayPal Subscriptions.
+ * Billing — Lemon Squeezy checkout (PayPal + Paddle routes kept commented).
  *
- * POST /webhooks/paypal — no session (PayPal signature verified)
+ * POST /webhooks/lemonsqueezy — no session (HMAC verified)
  * GET  /overview — owner/admin billing dashboard data
- * POST /checkout — create PayPal approval URL
+ * POST /checkout — create Lemon hosted checkout URL
  */
 export const billingRouter = Router();
 
@@ -34,19 +34,23 @@ const checkoutLimiter = rateLimit({
 });
 
 billingRouter.post(
-  "/webhooks/paypal",
-  asyncHandler(billingController.paypalWebhook),
+  "/webhooks/lemonsqueezy",
+  asyncHandler(billingController.lemonWebhook),
 );
 
-billingRouter.post(
-  "/webhooks/paddle",
-  asyncHandler(billingController.paddleWebhook),
-);
-
-billingRouter.get(
-  "/paddle/config",
-  asyncHandler(billingController.paddleCardConfig),
-);
+// PayPal + Paddle checkout paused — restore these routes if we switch providers.
+// billingRouter.post(
+//   "/webhooks/paypal",
+//   asyncHandler(billingController.paypalWebhook),
+// );
+// billingRouter.post(
+//   "/webhooks/paddle",
+//   asyncHandler(billingController.paddleWebhook),
+// );
+// billingRouter.get(
+//   "/paddle/config",
+//   asyncHandler(billingController.paddleCardConfig),
+// );
 
 billingRouter.use(requireFullAuth);
 billingRouter.use(requireEmailVerified);
@@ -59,6 +63,12 @@ billingRouter.get(
 );
 
 billingRouter.post(
+  "/sync",
+  requirePermission("org.update"),
+  asyncHandler(billingController.syncCheckout),
+);
+
+billingRouter.post(
   "/checkout",
   checkoutLimiter,
   requirePermission("org.update"),
@@ -66,47 +76,10 @@ billingRouter.post(
   asyncHandler(billingController.createCheckout),
 );
 
-billingRouter.get(
-  "/card/config",
-  requirePermission("org.read"),
-  asyncHandler(billingController.paypalCardConfig),
-);
-
-billingRouter.post(
-  "/card/client-token",
-  checkoutLimiter,
-  requirePermission("org.update"),
-  asyncHandler(billingController.paypalCardClientToken),
-);
-
-billingRouter.post(
-  "/card/orders",
-  checkoutLimiter,
-  requirePermission("org.update"),
-  validateBody(createCheckoutBodySchema),
-  asyncHandler(billingController.createCardOrder),
-);
-
-billingRouter.post(
-  "/card/capture",
-  checkoutLimiter,
-  requirePermission("org.update"),
-  validateBody(captureCardBodySchema),
-  asyncHandler(billingController.captureCardOrder),
-);
-
-billingRouter.post(
-  "/paddle/checkout",
-  checkoutLimiter,
-  requirePermission("org.update"),
-  validateBody(createCheckoutBodySchema),
-  asyncHandler(billingController.createPaddleCheckout),
-);
-
-billingRouter.post(
-  "/paddle/confirm",
-  checkoutLimiter,
-  requirePermission("org.update"),
-  validateBody(confirmPaddleBodySchema),
-  asyncHandler(billingController.confirmPaddleCheckout),
-);
+// PayPal on-site card fields + Paddle overlay — paused.
+// billingRouter.get("/card/config", ...);
+// billingRouter.post("/card/client-token", ...);
+// billingRouter.post("/card/orders", ...);
+// billingRouter.post("/card/capture", ...);
+// billingRouter.post("/paddle/checkout", ...);
+// billingRouter.post("/paddle/confirm", ...);

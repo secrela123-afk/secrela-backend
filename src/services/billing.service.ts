@@ -1,6 +1,15 @@
 import { env } from "../config/env.js";
 import { AppError } from "../lib/errors/AppError.js";
 import {
+  createLemonCheckout,
+  lemonVariantIdFromAttributes,
+  listLemonSubscriptions,
+  planFromVariantId,
+  updateLemonSubscription,
+  variantIdForPlan,
+  verifyLemonWebhookSignature,
+} from "../lib/lemonSqueezy.js";
+import {
   activatePaypalSubscription,
   capturePaypalOrder,
   createPaypalCaptureOrder,
@@ -48,6 +57,7 @@ export type PaymentMethodDto = {
 };
 
 export type BillingOverview = {
+  lemonConfigured: boolean;
   paypalConfigured: boolean;
   paddleConfigured: boolean;
   planSlug: PlanSlug;
@@ -87,8 +97,9 @@ export function billingOverviewFromOrg(
   org: OrganizationDocument,
 ): BillingOverview {
   return {
-    paypalConfigured: env.paypal.configured,
-    paddleConfigured: env.paddle.configured,
+    lemonConfigured: env.lemonSqueezy.configured,
+    paypalConfigured: false,
+    paddleConfigured: false,
     planSlug: (org.planSlug ?? "starter") as PlanSlug,
     planLabel: org.plan ?? planDisplayName((org.planSlug ?? "starter") as PlanSlug),
     subscriptionStatus: (org.subscriptionStatus ??
@@ -118,13 +129,15 @@ export async function getBillingOverviewForUser(
       code: "ORGANIZATION_NOT_FOUND",
     });
   }
+  if (shouldPullLemonAfterCheckout(organization)) {
+    return syncLemonSubscriptionForUser(userId);
+  }
   return billingOverviewFromOrg(organization);
 }
 
 /**
- * Create a PayPal hosted subscription approval URL for the org's owner/admin.
- * The customer can pay with a Visa/Mastercard on PayPal without a PayPal account
- * (guest checkout), when PayPal allows it for that buyer country.
+ * Create a Lemon Squeezy hosted checkout URL for the org owner/admin.
+ * Card details stay on Lemon (Merchant of Record). PayPal/Paddle are paused.
  */
 export async function createCheckoutSessionForUser(
   userId: string,
@@ -151,11 +164,11 @@ export async function createCheckoutSessionForUser(
     throw new AppError(401, "User not found", { code: "UNAUTHORIZED" });
   }
 
-  if (!env.paypal.configured) {
-    if (!env.paypal.allowMockActivate) {
+  if (!env.lemonSqueezy.configured) {
+    if (!env.lemonSqueezy.allowMockActivate) {
       throw new AppError(
         503,
-        "PayPal is not configured. Add PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, and PAYPAL_PLAN_* ids.",
+        "Lemon Squeezy is not configured. Add LEMON_SQUEEZY_API_KEY, store id, and variant ids.",
         { code: "BILLING_PROVIDER_NOT_CONFIGURED" },
       );
     }
@@ -166,32 +179,32 @@ export async function createCheckoutSessionForUser(
     return { checkoutUrl: `${env.appOrigin}/app/billing?mock=1`, mockActivated: true };
   }
 
-  const planId = paypalPlanIdFor(planSlug, interval);
-  if (!planId) {
-    throw new AppError(500, "Missing PayPal plan ID for this plan", {
-      code: "PAYPAL_PLAN_MISSING",
+  const variantId = variantIdForPlan(planSlug, interval);
+  if (!variantId) {
+    throw new AppError(500, "Missing Lemon Squeezy variant ID for this plan", {
+      code: "LEMON_VARIANT_MISSING",
     });
   }
 
-  const returnUrl = `${env.appOrigin}/app/billing?checkout=success`;
-  const cancelUrl = `${env.appOrigin}/checkout?plan=${planSlug}&interval=${interval}`;
-
-  const { approveUrl, subscriptionId } = await createPaypalSubscription({
-    planId,
-    customId: encodePaypalCustomId(
-      organization._id.toString(),
+  const redirectUrl = `${env.appOrigin}/app/billing?checkout=success`;
+  const { checkoutUrl, checkoutId } = await createLemonCheckout({
+    variantId,
+    email: user.email,
+    name: user.name,
+    custom: {
+      organizationId: organization._id.toString(),
       planSlug,
       interval,
-    ),
-    returnUrl,
-    cancelUrl,
-    brandName: env.appName,
+    },
+    redirectUrl,
   });
 
-  organization.paypalSubscriptionId = subscriptionId;
-  await organization.save();
+  organization.pendingLemonCheckoutId = checkoutId;
+  organization.pendingLemonPlanSlug = planSlug;
+  organization.pendingLemonInterval = interval;
+  await asMutableOrg(organization).save();
 
-  return { checkoutUrl: approveUrl };
+  return { checkoutUrl };
 }
 
 async function requireOwnerOrAdmin(userId: string) {
@@ -734,10 +747,364 @@ export async function syncAutoRenewToPaypal(
   }
 }
 
-/** @deprecated Lemon path disabled — calls PayPal. */
+/** Pause / resume Lemon subscription when the owner toggles auto-renew. */
 export async function syncAutoRenewToLemon(
   org: OrganizationDocument,
   autoRenew: boolean,
 ): Promise<void> {
-  await syncAutoRenewToPaypal(org, autoRenew);
+  if (!env.lemonSqueezy.configured || !org.lemonSubscriptionId) {
+    return;
+  }
+  if (!autoRenew) {
+    await updateLemonSubscription(org.lemonSubscriptionId, {
+      pause: { mode: "void" },
+    });
+    return;
+  }
+  await updateLemonSubscription(org.lemonSubscriptionId, { pause: null });
+}
+
+export function verifyLemonWebhookRequest(
+  signatureHeader: string | undefined,
+  rawBody: string,
+): boolean {
+  return verifyLemonWebhookSignature(rawBody, signatureHeader);
+}
+
+type LemonWebhookBody = {
+  meta?: {
+    event_name?: string;
+    custom_data?: {
+      organizationId?: string;
+      planSlug?: string;
+      interval?: string;
+    };
+  };
+  data?: {
+    id?: string;
+    type?: string;
+    attributes?: Record<string, unknown> & {
+      status?: string;
+      customer_id?: number | string;
+      order_id?: number | string;
+      card_brand?: string | null;
+      card_last_four?: string | null;
+      renews_at?: string | null;
+      urls?: {
+        update_payment_method?: string;
+        customer_portal?: string;
+      };
+    };
+  };
+};
+
+function mapLemonStatus(raw: string): SubscriptionStatus {
+  switch (raw) {
+    case "on_trial":
+      return "trialing";
+    case "active":
+    case "paid":
+      return "active";
+    case "paused":
+    case "past_due":
+    case "unpaid":
+      return "pending_payment";
+    case "cancelled":
+    case "expired":
+      return "expired";
+    default:
+      return "active";
+  }
+}
+
+function shouldPullLemonAfterCheckout(org: OrganizationDocument): boolean {
+  if (!env.lemonSqueezy.configured) return false;
+  if (
+    org.subscriptionStatus === "active" &&
+    isPaidPlanSlug(String(org.planSlug ?? ""))
+  ) {
+    return false;
+  }
+  return (
+    org.subscriptionStatus === "trialing" ||
+    org.planSlug === "free" ||
+    Boolean(org.pendingLemonPlanSlug)
+  );
+}
+
+function resolvePaidPlan(
+  custom: { planSlug?: string; interval?: string },
+  attrs: Record<string, unknown>,
+  fallbackOrg?: OrganizationDocument,
+): { planSlug: PaidPlanSlug; interval: BillingInterval } | null {
+  const fromVariant = planFromVariantId(lemonVariantIdFromAttributes(attrs));
+  const pendingSlug = String(fallbackOrg?.pendingLemonPlanSlug ?? "");
+  const planSlug = isPaidPlanSlug(custom.planSlug)
+    ? custom.planSlug
+    : isPaidPlanSlug(pendingSlug)
+      ? pendingSlug
+      : fromVariant?.planSlug;
+  const pendingInterval = fallbackOrg?.pendingLemonInterval;
+  const interval =
+    custom.interval === "monthly" || custom.interval === "yearly"
+      ? custom.interval
+      : pendingInterval === "monthly" || pendingInterval === "yearly"
+        ? pendingInterval
+        : fromVariant?.interval;
+  if (!planSlug || !interval) return null;
+  return { planSlug, interval };
+}
+
+async function applyLemonPurchaseToOrg(
+  org: OrganizationDocument,
+  patch: {
+    planSlug?: PaidPlanSlug;
+    interval?: BillingInterval;
+    subscriptionId?: string;
+    orderId?: string;
+    customerId?: string;
+    status?: string;
+    cardBrand?: string | null;
+    cardLast4?: string | null;
+    updatePaymentUrl?: string;
+    customerPortalUrl?: string;
+    renewsAt?: string | null;
+  },
+): Promise<OrganizationDocument> {
+  if (patch.planSlug && patch.interval) {
+    await activateOrganizationSubscription(org, patch.planSlug, patch.interval);
+  }
+  const fresh = await Organization.findById(org._id);
+  if (!fresh) {
+    throw new AppError(404, "Organization no longer exists", {
+      code: "ORGANIZATION_NOT_FOUND",
+    });
+  }
+  if (patch.subscriptionId) fresh.lemonSubscriptionId = patch.subscriptionId;
+  if (patch.orderId) fresh.lemonOrderId = patch.orderId;
+  if (patch.customerId) fresh.lemonCustomerId = patch.customerId;
+  fresh.pendingLemonCheckoutId = null;
+  fresh.pendingLemonPlanSlug = null;
+  fresh.pendingLemonInterval = null;
+  if (patch.status) {
+    fresh.autoRenew = patch.status === "active" || patch.status === "on_trial";
+    if (patch.planSlug) {
+      fresh.subscriptionStatus = mapLemonStatus(patch.status);
+    }
+  } else if (patch.planSlug) {
+    fresh.autoRenew = true;
+  }
+  upsertPaymentMethod(fresh, patch.cardBrand, patch.cardLast4);
+  if (patch.updatePaymentUrl) {
+    fresh.lemonUpdatePaymentUrl = patch.updatePaymentUrl;
+  }
+  if (patch.customerPortalUrl) {
+    fresh.lemonCustomerPortalUrl = patch.customerPortalUrl;
+  }
+  if (patch.renewsAt) {
+    const renews = new Date(patch.renewsAt);
+    if (!Number.isNaN(renews.getTime())) fresh.currentPeriodEndsAt = renews;
+  }
+  await asMutableOrg(fresh).save();
+  return fresh;
+}
+
+const lemonSyncInFlight = new Map<string, Promise<BillingOverview>>();
+
+function lemonUrls(attrs: Record<string, unknown>): {
+  updatePaymentUrl?: string;
+  customerPortalUrl?: string;
+} {
+  const urls = attrs.urls;
+  if (!urls || typeof urls !== "object") return {};
+  const u = urls as {
+    update_payment_method?: string;
+    customer_portal?: string;
+  };
+  return {
+    updatePaymentUrl: u.update_payment_method,
+    customerPortalUrl: u.customer_portal,
+  };
+}
+
+/**
+ * After Lemon hosted checkout, webhooks often never reach localhost
+ * (and custom_data can be missing). Pull the subscription from Lemon by email.
+ */
+export async function syncLemonSubscriptionForUser(
+  userId: string,
+): Promise<BillingOverview> {
+  const { membership } = await loadMembershipContext(userId);
+  const orgId = membership.organizationId.toString();
+  const existing = lemonSyncInFlight.get(orgId);
+  if (existing) return existing;
+
+  const run = (async () => {
+    const organization = await Organization.findById(membership.organizationId);
+    if (!organization) {
+      throw new AppError(404, "Organization no longer exists", {
+        code: "ORGANIZATION_NOT_FOUND",
+      });
+    }
+    if (
+      organization.subscriptionStatus === "active" &&
+      isPaidPlanSlug(String(organization.planSlug ?? "")) &&
+      organization.lemonSubscriptionId
+    ) {
+      return billingOverviewFromOrg(organization);
+    }
+    if (!env.lemonSqueezy.configured) {
+      return billingOverviewFromOrg(organization);
+    }
+
+    const user = await User.findById(userId).select("email").lean();
+    if (!user?.email) {
+      return billingOverviewFromOrg(organization);
+    }
+    const subs = await listLemonSubscriptions({
+      email: user.email,
+    });
+    const usable = subs.filter((sub) => {
+      const status = String(sub.attributes.status ?? "");
+      return (
+        status === "active" ||
+        status === "on_trial" ||
+        status === "past_due" ||
+        status === "paid"
+      );
+    });
+
+    const pendingVariant =
+      organization.pendingLemonPlanSlug && organization.pendingLemonInterval
+        ? variantIdForPlan(
+            organization.pendingLemonPlanSlug as PaidPlanSlug,
+            organization.pendingLemonInterval as BillingInterval,
+          )
+        : "";
+    const chosen =
+      usable.find((sub) => {
+        const vid = lemonVariantIdFromAttributes(sub.attributes);
+        return Boolean(pendingVariant) && vid === pendingVariant;
+      }) ?? usable[0];
+
+    if (!chosen) {
+      return billingOverviewFromOrg(organization);
+    }
+
+    const attrs = chosen.attributes;
+    const resolved = resolvePaidPlan(
+      {
+        planSlug: organization.pendingLemonPlanSlug ?? undefined,
+        interval: organization.pendingLemonInterval ?? undefined,
+      },
+      attrs,
+      organization,
+    );
+    const updated = await applyLemonPurchaseToOrg(organization, {
+      planSlug: resolved?.planSlug,
+      interval: resolved?.interval,
+      subscriptionId: chosen.id,
+      orderId: attrs.order_id != null ? String(attrs.order_id) : undefined,
+      customerId:
+        attrs.customer_id != null ? String(attrs.customer_id) : undefined,
+      status: String(attrs.status ?? "active"),
+      cardBrand: attrs.card_brand != null ? String(attrs.card_brand) : null,
+      cardLast4:
+        attrs.card_last_four != null ? String(attrs.card_last_four) : null,
+      renewsAt: attrs.renews_at != null ? String(attrs.renews_at) : null,
+      ...lemonUrls(attrs),
+    });
+    return billingOverviewFromOrg(updated);
+  })().finally(() => {
+    lemonSyncInFlight.delete(orgId);
+  });
+
+  lemonSyncInFlight.set(orgId, run);
+  return run;
+}
+
+export async function handleLemonWebhook(
+  event: LemonWebhookBody,
+): Promise<{ received: true }> {
+  const type = event.meta?.event_name ?? "";
+  const custom = event.meta?.custom_data ?? {};
+  const dataId = event.data?.id ?? "";
+  const dataType = event.data?.type ?? "";
+  const attrs = event.data?.attributes ?? {};
+  const isOrder = type === "order_created" || dataType === "orders";
+  const subscriptionId = isOrder ? "" : dataId;
+  const orderId = isOrder
+    ? dataId
+    : attrs.order_id != null
+      ? String(attrs.order_id)
+      : "";
+
+  let org: OrganizationDocument | null = null;
+  if (custom.organizationId) {
+    org = await Organization.findById(custom.organizationId);
+  }
+  if (!org && subscriptionId) {
+    org = await Organization.findOne({ lemonSubscriptionId: subscriptionId });
+  }
+  if (!org && orderId) {
+    org = await Organization.findOne({ lemonOrderId: orderId });
+  }
+
+  const paidEvents = new Set([
+    "order_created",
+    "subscription_created",
+    "subscription_updated",
+    "subscription_resumed",
+    "subscription_unpaused",
+    "subscription_payment_success",
+    "subscription_payment_recovered",
+  ]);
+
+  if (!org) {
+    if (paidEvents.has(type)) {
+      console.warn("[billing] lemon webhook unmatched", {
+        event: type,
+        hasOrganizationId: Boolean(custom.organizationId),
+      });
+    }
+    return { received: true };
+  }
+
+  if (paidEvents.has(type)) {
+    const resolved = resolvePaidPlan(custom, attrs, org);
+    await applyLemonPurchaseToOrg(org, {
+      planSlug: resolved?.planSlug,
+      interval: resolved?.interval,
+      subscriptionId: subscriptionId || undefined,
+      orderId: orderId || undefined,
+      customerId:
+        attrs.customer_id != null ? String(attrs.customer_id) : undefined,
+      status: String(attrs.status ?? "active"),
+      cardBrand: attrs.card_brand != null ? String(attrs.card_brand) : null,
+      cardLast4:
+        attrs.card_last_four != null ? String(attrs.card_last_four) : null,
+      renewsAt: attrs.renews_at != null ? String(attrs.renews_at) : null,
+      ...lemonUrls(attrs),
+    });
+    return { received: true };
+  }
+
+  if (
+    type === "subscription_cancelled" ||
+    type === "subscription_expired" ||
+    type === "subscription_paused"
+  ) {
+    org.subscriptionStatus =
+      type === "subscription_paused" ? "pending_payment" : "expired";
+    org.autoRenew = false;
+    await asMutableOrg(org).save();
+    return { received: true };
+  }
+
+  if (type === "subscription_payment_failed") {
+    org.subscriptionStatus = "pending_payment";
+    await asMutableOrg(org).save();
+  }
+
+  return { received: true };
 }

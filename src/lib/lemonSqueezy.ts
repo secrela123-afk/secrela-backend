@@ -1,11 +1,9 @@
 /**
- * DISABLED — checkout now uses PayPal (`lib/paypal.ts`).
- * This file is kept so we can restore Lemon later; nothing in the live
- * request path imports these functions.
- *
- * Minimal Lemon Squeezy REST client (JSON:API).
+ * Lemon Squeezy REST (JSON:API) — current card checkout provider.
+ * PayPal and Paddle stay in the repo but are not on the live checkout path.
  * Docs: https://docs.lemonsqueezy.com/api
  */
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { env } from "../config/env.js";
 import { AppError } from "./errors/AppError.js";
 import type { BillingInterval, PaidPlanSlug } from "./subscriptionPlans.js";
@@ -34,11 +32,11 @@ function requireConfigured(): void {
   }
 }
 
-async function lemonRequest(
+async function lemonFetch(
   method: string,
   path: string,
   body?: unknown,
-): Promise<JsonApiResponse> {
+): Promise<unknown> {
   requireConfigured();
 
   const res = await fetch(`${API_BASE}${path}`, {
@@ -52,13 +50,11 @@ async function lemonRequest(
   });
 
   const text = await res.text();
-  let json: JsonApiResponse | { errors?: unknown } = {
-    data: { type: "", id: "", attributes: {} },
-  };
+  let json: unknown = {};
   try {
-    json = JSON.parse(text) as JsonApiResponse;
+    json = JSON.parse(text) as unknown;
   } catch {
-    /* leave empty */
+    json = {};
   }
 
   if (!res.ok) {
@@ -69,7 +65,15 @@ async function lemonRequest(
     );
   }
 
-  return json as JsonApiResponse;
+  return json;
+}
+
+async function lemonRequest(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<JsonApiResponse> {
+  return (await lemonFetch(method, path, body)) as JsonApiResponse;
 }
 
 export type CreateCheckoutInput = {
@@ -104,7 +108,7 @@ export async function createLemonCheckout(input: CreateCheckoutInput): Promise<{
         },
         product_options: {
           redirect_url: input.redirectUrl,
-          receipt_button_text: "Back to SecureVault",
+          receipt_button_text: "Back to Secrela",
           receipt_link_url: input.redirectUrl,
         },
       },
@@ -166,4 +170,72 @@ export function variantIdForPlan(
     business: { monthly: v.businessMonthly, yearly: v.businessYearly },
   } as const;
   return byPlan[planSlug][interval];
+}
+
+export function planFromVariantId(
+  variantId: string,
+): { planSlug: PaidPlanSlug; interval: BillingInterval } | null {
+  const id = variantId.trim();
+  if (!id) return null;
+  const v = env.lemonSqueezy.variants;
+  const rows: Array<{
+    id: string;
+    planSlug: PaidPlanSlug;
+    interval: BillingInterval;
+  }> = [
+    { id: v.starterMonthly, planSlug: "starter", interval: "monthly" },
+    { id: v.starterYearly, planSlug: "starter", interval: "yearly" },
+    { id: v.teamMonthly, planSlug: "team", interval: "monthly" },
+    { id: v.teamYearly, planSlug: "team", interval: "yearly" },
+    { id: v.businessMonthly, planSlug: "business", interval: "monthly" },
+    { id: v.businessYearly, planSlug: "business", interval: "yearly" },
+  ];
+  return rows.find((row) => row.id && row.id === id) ?? null;
+}
+
+export function lemonVariantIdFromAttributes(
+  attrs: Record<string, unknown>,
+): string {
+  if (attrs.variant_id != null) return String(attrs.variant_id);
+  const subItem = attrs.first_subscription_item;
+  if (subItem && typeof subItem === "object" && "variant_id" in subItem) {
+    const id = (subItem as { variant_id?: unknown }).variant_id;
+    if (id != null) return String(id);
+  }
+  const orderItem = attrs.first_order_item;
+  if (orderItem && typeof orderItem === "object" && "variant_id" in orderItem) {
+    const id = (orderItem as { variant_id?: unknown }).variant_id;
+    if (id != null) return String(id);
+  }
+  return "";
+}
+
+/** List subscriptions for this store (used to activate after hosted checkout return). */
+export async function listLemonSubscriptions(filters: {
+  email?: string;
+  orderId?: string;
+}): Promise<JsonApiResource[]> {
+  const params = new URLSearchParams();
+  params.set("filter[store_id]", env.lemonSqueezy.storeId);
+  if (filters.email) params.set("filter[user_email]", filters.email);
+  if (filters.orderId) params.set("filter[order_id]", filters.orderId);
+  const json = (await lemonFetch(
+    "GET",
+    `/subscriptions?${params.toString()}`,
+  )) as { data?: JsonApiResource | JsonApiResource[] };
+  if (!json.data) return [];
+  return Array.isArray(json.data) ? json.data : [json.data];
+}
+
+export function verifyLemonWebhookSignature(
+  rawBody: string,
+  signatureHeader: string | undefined,
+): boolean {
+  const secret = env.lemonSqueezy.webhookSecret;
+  if (!secret || !signatureHeader) return false;
+  const digest = createHmac("sha256", secret).update(rawBody).digest("hex");
+  const a = Buffer.from(digest, "utf8");
+  const b = Buffer.from(signatureHeader.trim(), "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }

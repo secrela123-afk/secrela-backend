@@ -67,6 +67,7 @@ export type BillingOverview = {
   subscriptionAmountCents: number | null;
   currency: string;
   autoRenew: boolean;
+  autoRenewInterval: BillingInterval | null;
   trialEndsAt: string | null;
   currentPeriodEndsAt: string | null;
   cardBrand: string | null;
@@ -108,6 +109,9 @@ export function billingOverviewFromOrg(
     subscriptionAmountCents: org.subscriptionAmountCents ?? null,
     currency: org.currency ?? "USD",
     autoRenew: Boolean(org.autoRenew),
+    autoRenewInterval: (org.autoRenewInterval ??
+      org.billingInterval ??
+      null) as BillingInterval | null,
     trialEndsAt: toIso(org.trialEndsAt),
     currentPeriodEndsAt: toIso(org.currentPeriodEndsAt),
     cardBrand: org.cardBrand ?? null,
@@ -758,21 +762,27 @@ export async function syncAutoRenewToPaypal(
   }
 }
 
-/** Pause / resume Lemon subscription when the owner toggles auto-renew. */
+/** Cancel / resume Lemon subscription when the owner toggles auto-renew.
+ * Lemon owns charging: monthly variants renew monthly, yearly renew yearly.
+ * Turning off sets cancelled=true (access until period end). Turning on uncancels.
+ */
 export async function syncAutoRenewToLemon(
   org: OrganizationDocument,
   autoRenew: boolean,
 ): Promise<void> {
-  if (!env.lemonSqueezy.configured || !org.lemonSubscriptionId) {
+  if (!env.lemonSqueezy.configured) {
     return;
   }
-  if (!autoRenew) {
-    await updateLemonSubscription(org.lemonSubscriptionId, {
-      pause: { mode: "void" },
-    });
-    return;
+  if (!org.lemonSubscriptionId) {
+    throw new AppError(
+      400,
+      "No Lemon subscription on this workspace yet. Complete a card checkout first.",
+      { code: "LEMON_SUBSCRIPTION_MISSING" },
+    );
   }
-  await updateLemonSubscription(org.lemonSubscriptionId, { pause: null });
+  await updateLemonSubscription(org.lemonSubscriptionId, {
+    cancelled: !autoRenew,
+  });
 }
 
 export function verifyLemonWebhookRequest(
@@ -800,7 +810,9 @@ type LemonWebhookBody = {
       order_id?: number | string;
       card_brand?: string | null;
       card_last_four?: string | null;
+      cancelled?: boolean;
       renews_at?: string | null;
+      ends_at?: string | null;
       urls?: {
         update_payment_method?: string;
         customer_portal?: string;
@@ -808,25 +820,6 @@ type LemonWebhookBody = {
     };
   };
 };
-
-function mapLemonStatus(raw: string): SubscriptionStatus {
-  switch (raw) {
-    case "on_trial":
-      return "trialing";
-    case "active":
-    case "paid":
-      return "active";
-    case "paused":
-    case "past_due":
-    case "unpaid":
-      return "pending_payment";
-    case "cancelled":
-    case "expired":
-      return "expired";
-    default:
-      return "active";
-  }
-}
 
 function shouldPullLemonAfterCheckout(org: OrganizationDocument): boolean {
   if (!env.lemonSqueezy.configured) return false;
@@ -875,11 +868,13 @@ async function applyLemonPurchaseToOrg(
     orderId?: string;
     customerId?: string;
     status?: string;
+    cancelled?: boolean;
     cardBrand?: string | null;
     cardLast4?: string | null;
     updatePaymentUrl?: string;
     customerPortalUrl?: string;
     renewsAt?: string | null;
+    endsAt?: string | null;
   },
 ): Promise<OrganizationDocument> {
   if (patch.planSlug && patch.interval) {
@@ -897,14 +892,42 @@ async function applyLemonPurchaseToOrg(
   fresh.pendingLemonCheckoutId = null;
   fresh.pendingLemonPlanSlug = null;
   fresh.pendingLemonInterval = null;
-  if (patch.status) {
-    fresh.autoRenew = patch.status === "active" || patch.status === "on_trial";
-    if (patch.planSlug) {
-      fresh.subscriptionStatus = mapLemonStatus(patch.status);
-    }
-  } else if (patch.planSlug) {
+
+  const endsAt = parseLemonDate(patch.endsAt);
+  const renewsAt = parseLemonDate(patch.renewsAt);
+  const periodEnd = endsAt ?? renewsAt;
+  if (periodEnd) fresh.currentPeriodEndsAt = periodEnd;
+
+  const lemonStatus = (patch.status ?? "").toLowerCase();
+  const isCancelled =
+    patch.cancelled === true || lemonStatus === "cancelled";
+  const stillInPaidPeriod =
+    Boolean(periodEnd && periodEnd.getTime() > Date.now()) ||
+    Boolean(
+      fresh.currentPeriodEndsAt &&
+        fresh.currentPeriodEndsAt.getTime() > Date.now(),
+    );
+
+  if (isCancelled) {
+    fresh.autoRenew = false;
+    // Cancel-at-period-end: keep workspace active until Lemon ends_at.
+    fresh.subscriptionStatus = stillInPaidPeriod ? "active" : "expired";
+  } else if (lemonStatus === "paused" || lemonStatus === "past_due" || lemonStatus === "unpaid") {
+    fresh.autoRenew = false;
+    fresh.subscriptionStatus = stillInPaidPeriod ? "active" : "pending_payment";
+  } else if (lemonStatus === "expired") {
+    fresh.autoRenew = false;
+    fresh.subscriptionStatus = "expired";
+  } else if (lemonStatus === "on_trial") {
     fresh.autoRenew = true;
+    fresh.subscriptionStatus = "trialing";
+  } else if (lemonStatus === "active" || lemonStatus === "paid" || patch.planSlug) {
+    fresh.autoRenew = true;
+    if (patch.interval) fresh.autoRenewInterval = patch.interval;
+    else if (fresh.billingInterval) fresh.autoRenewInterval = fresh.billingInterval;
+    fresh.subscriptionStatus = "active";
   }
+
   upsertPaymentMethod(fresh, patch.cardBrand, patch.cardLast4);
   if (patch.updatePaymentUrl) {
     fresh.lemonUpdatePaymentUrl = patch.updatePaymentUrl;
@@ -912,12 +935,14 @@ async function applyLemonPurchaseToOrg(
   if (patch.customerPortalUrl) {
     fresh.lemonCustomerPortalUrl = patch.customerPortalUrl;
   }
-  if (patch.renewsAt) {
-    const renews = new Date(patch.renewsAt);
-    if (!Number.isNaN(renews.getTime())) fresh.currentPeriodEndsAt = renews;
-  }
   await asMutableOrg(fresh).save();
   return fresh;
+}
+
+function parseLemonDate(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 const lemonSyncInFlight = new Map<string, Promise<BillingOverview>>();
@@ -1091,10 +1116,12 @@ export async function handleLemonWebhook(
       customerId:
         attrs.customer_id != null ? String(attrs.customer_id) : undefined,
       status: String(attrs.status ?? "active"),
+      cancelled: Boolean(attrs.cancelled),
       cardBrand: attrs.card_brand != null ? String(attrs.card_brand) : null,
       cardLast4:
         attrs.card_last_four != null ? String(attrs.card_last_four) : null,
       renewsAt: attrs.renews_at != null ? String(attrs.renews_at) : null,
+      endsAt: attrs.ends_at != null ? String(attrs.ends_at) : null,
       ...lemonUrls(attrs),
     });
     return { received: true };
@@ -1105,15 +1132,32 @@ export async function handleLemonWebhook(
     type === "subscription_expired" ||
     type === "subscription_paused"
   ) {
-    org.subscriptionStatus =
-      type === "subscription_paused" ? "pending_payment" : "expired";
+    const endsAt = parseLemonDate(
+      attrs.ends_at != null ? String(attrs.ends_at) : null,
+    );
+    const renewsAt = parseLemonDate(
+      attrs.renews_at != null ? String(attrs.renews_at) : null,
+    );
+    const periodEnd = endsAt ?? renewsAt ?? org.currentPeriodEndsAt;
+    if (periodEnd) org.currentPeriodEndsAt = periodEnd;
     org.autoRenew = false;
+
+    if (type === "subscription_expired") {
+      org.subscriptionStatus = "expired";
+    } else if (periodEnd && periodEnd.getTime() > Date.now()) {
+      // Cancelled / paused at period end — keep access until the paid period ends.
+      org.subscriptionStatus = "active";
+    } else {
+      org.subscriptionStatus =
+        type === "subscription_paused" ? "pending_payment" : "expired";
+    }
     await asMutableOrg(org).save();
     return { received: true };
   }
 
   if (type === "subscription_payment_failed") {
     org.subscriptionStatus = "pending_payment";
+    org.autoRenew = false;
     await asMutableOrg(org).save();
   }
 

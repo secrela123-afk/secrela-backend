@@ -813,14 +813,11 @@ export async function updateAutoRenewForUser(
     });
   }
 
-  const updated = await updateAutoRenewSettings(organization, input);
+  // Tell Lemon first so a failed API call does not leave a lying local flag.
+  const { syncAutoRenewToLemon } = await import("./billing.service.js");
+  await syncAutoRenewToLemon(organization, input.autoRenew);
 
-  try {
-    const { syncAutoRenewToLemon } = await import("./billing.service.js");
-    await syncAutoRenewToLemon(updated, input.autoRenew);
-  } catch {
-    // Lemon sync failure should not block local preference; webhooks will reconcile.
-  }
+  const updated = await updateAutoRenewSettings(organization, input);
 
   return withResolvedRole(toOrganizationDto(updated), resolved);
 }

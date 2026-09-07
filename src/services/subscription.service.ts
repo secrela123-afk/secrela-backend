@@ -137,10 +137,11 @@ async function markExpired(
 }
 
 /**
- * Auto-renew without payment gateway: extend currentPeriodEndsAt and keep active.
- * When Stripe exists, this becomes “charge then extend”.
+ * Free DB extension without charging — only when Lemon is not managing this org.
+ * Live Lemon subscriptions renew (and charge) on Lemon's side by variant interval.
  */
 async function autoRenewIfEnabled(org: OrganizationDocument): Promise<boolean> {
+  if (org.lemonSubscriptionId) return false;
   if (!org.autoRenew) return false;
   const interval = (org.autoRenewInterval ??
     org.billingInterval) as BillingInterval | null;
@@ -184,7 +185,7 @@ async function autoRenewIfEnabled(org: OrganizationDocument): Promise<boolean> {
     type: "subscription.renewed",
     title: "Subscription renewed",
     body: `Your ${planDisplayName(planSlug)} plan was renewed for another ${interval === "yearly" ? "year" : "month"}.`,
-    href: "/app/settings",
+    href: "/app/billing",
     meta: { planSlug, interval, amountCents: amount },
   });
 
@@ -303,7 +304,8 @@ export async function activateOrganizationSubscription(
         plan: planDisplayName(planSlug),
         subscriptionStatus: "active",
         billingInterval: interval,
-        autoRenewInterval: org.autoRenew ? interval : org.autoRenewInterval,
+        autoRenew: true,
+        autoRenewInterval: interval,
         subscriptionAmountCents: amount,
         currency: "USD",
         trialEndsAt: null,

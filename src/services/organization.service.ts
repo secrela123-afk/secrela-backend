@@ -813,9 +813,9 @@ export async function updateAutoRenewForUser(
     });
   }
 
-  // Tell Lemon first so a failed API call does not leave a lying local flag.
-  const { syncAutoRenewToLemon } = await import("./billing.service.js");
-  await syncAutoRenewToLemon(organization, input.autoRenew);
+  // Tell Creem first so a failed API call does not leave a lying local flag.
+  const { syncAutoRenewToCreem } = await import("./billing.service.js");
+  await syncAutoRenewToCreem(organization, input.autoRenew);
 
   const updated = await updateAutoRenewSettings(organization, input);
 

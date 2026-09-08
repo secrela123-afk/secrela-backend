@@ -12,11 +12,11 @@ import { validateBody } from "../../middleware/validateBody.js";
 import { createCheckoutBodySchema } from "../../schemas/billing.schemas.js";
 
 /**
- * Billing — Lemon Squeezy checkout (PayPal + Paddle routes kept commented).
+ * Billing — Creem checkout (Lemon + PayPal + Paddle routes kept commented).
  *
- * POST /webhooks/lemonsqueezy — no session (HMAC verified)
+ * POST /webhooks/creem — no session (HMAC verified)
  * GET  /overview — owner/admin billing dashboard data
- * POST /checkout — create Lemon hosted checkout URL
+ * POST /checkout — create Creem hosted checkout URL
  */
 export const billingRouter = Router();
 
@@ -34,9 +34,15 @@ const checkoutLimiter = rateLimit({
 });
 
 billingRouter.post(
-  "/webhooks/lemonsqueezy",
-  asyncHandler(billingController.lemonWebhook),
+  "/webhooks/creem",
+  asyncHandler(billingController.creemWebhook),
 );
+
+// Lemon Squeezy paused — restore this route if we switch back.
+// billingRouter.post(
+//   "/webhooks/lemonsqueezy",
+//   asyncHandler(billingController.lemonWebhook),
+// );
 
 // PayPal + Paddle checkout paused — restore these routes if we switch providers.
 // billingRouter.post(

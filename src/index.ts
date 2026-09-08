@@ -18,11 +18,16 @@ async function main() {
       `[securevault-api] google: ${env.googleOAuth.enabled ? "OAuth enabled" : "OAuth DISABLED (set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET in backend/.env)"}`,
     );
     console.log(
-      `[securevault-api] lemon:  ${
-        env.lemonSqueezy.configured
-          ? "enabled"
-          : "DISABLED (missing API key, store id, or variant ids)"
+      `[securevault-api] creem:  ${
+        env.creem.configured
+          ? `enabled (${env.creem.mode})`
+          : "DISABLED (missing API key or product ids)"
       }`,
+    );
+    console.log(
+      `[securevault-api] lemon:  paused (keys ${
+        env.lemonSqueezy.configured ? "present" : "missing"
+      })`,
     );
     console.log(
       `[securevault-api] paypal: ${

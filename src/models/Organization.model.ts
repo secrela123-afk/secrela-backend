@@ -236,6 +236,50 @@ const organizationSchema = new Schema(
       default: null,
       maxlength: 800,
     },
+    /** Creem — current Merchant of Record IDs (never store full card numbers). */
+    creemCustomerId: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 80,
+    },
+    creemSubscriptionId: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 80,
+      index: true,
+    },
+    creemOrderId: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 80,
+      index: true,
+    },
+    pendingCreemCheckoutId: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 80,
+    },
+    pendingCreemPlanSlug: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 32,
+    },
+    pendingCreemInterval: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 16,
+    },
+    creemCustomerPortalUrl: {
+      type: String,
+      default: null,
+      maxlength: 800,
+    },
     /** PayPal Subscriptions ID (current billing provider). */
     paypalSubscriptionId: {
       type: String,

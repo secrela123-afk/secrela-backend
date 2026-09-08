@@ -241,7 +241,7 @@ export const env = {
     redirectUri: googleRedirectUri,
   },
   /**
-   * Lemon Squeezy (Merchant of Record) — current checkout provider.
+   * Lemon Squeezy — PAUSED. Keys may still be set; checkout uses Creem.
    * PayPal and Paddle env blocks below are unused until those routes are restored.
    */
   lemonSqueezy: (() => {
@@ -283,7 +283,58 @@ export const env = {
     };
   })(),
   /**
-   * PayPal Subscriptions (current checkout provider).
+   * Creem (Merchant of Record) — current checkout provider.
+   * Test vs live is CREEM_MODE. Product IDs come from the Creem dashboard
+   * (Test Mode products are separate from Live Mode products).
+   */
+  creem: (() => {
+    const apiKey = process.env.CREEM_API_KEY?.trim() ?? "";
+    const webhookSecret = process.env.CREEM_WEBHOOK_SECRET?.trim() ?? "";
+    const modeRaw = (process.env.CREEM_MODE ?? "test").toLowerCase();
+    const mode: "test" | "live" = modeRaw === "live" ? "live" : "test";
+    const products = {
+      starterMonthly: process.env.CREEM_PRODUCT_STARTER_MONTHLY?.trim() ?? "",
+      starterYearly: process.env.CREEM_PRODUCT_STARTER_YEARLY?.trim() ?? "",
+      teamMonthly: process.env.CREEM_PRODUCT_TEAM_MONTHLY?.trim() ?? "",
+      teamYearly: process.env.CREEM_PRODUCT_TEAM_YEARLY?.trim() ?? "",
+      businessMonthly: process.env.CREEM_PRODUCT_BUSINESS_MONTHLY?.trim() ?? "",
+      businessYearly: process.env.CREEM_PRODUCT_BUSINESS_YEARLY?.trim() ?? "",
+    };
+    const isTestKey = apiKey.startsWith("creem_test_");
+    if (mode === "live" && isTestKey) {
+      console.error(
+        "[securevault-api] CREEM_MODE=live but CREEM_API_KEY is a test key — checkout stays disabled",
+      );
+    }
+    if (isProduction && !webhookSecret) {
+      console.error(
+        "[securevault-api] CREEM_WEBHOOK_SECRET missing in production — checkout stays disabled",
+      );
+    }
+    const configured = Boolean(
+      apiKey &&
+        !(mode === "live" && isTestKey) &&
+        (!isProduction || webhookSecret) &&
+        products.starterMonthly &&
+        products.starterYearly &&
+        products.teamMonthly &&
+        products.teamYearly &&
+        products.businessMonthly &&
+        products.businessYearly,
+    );
+    return {
+      configured,
+      apiKey,
+      webhookSecret,
+      mode,
+      products,
+      allowMockActivate: isProduction
+        ? false
+        : parseBoolean(process.env.CREEM_ALLOW_MOCK_ACTIVATE, false),
+    };
+  })(),
+  /**
+   * PayPal Subscriptions (paused).
    * Sandbox vs live is PAYPAL_MODE. Plan IDs come from the PayPal dashboard.
    */
   paypal: (() => {

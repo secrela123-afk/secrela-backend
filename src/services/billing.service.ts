@@ -1,7 +1,18 @@
 import { env } from "../config/env.js";
 import { AppError } from "../lib/errors/AppError.js";
 import {
-  createLemonCheckout,
+  asId,
+  asRecord,
+  cancelCreemSubscription,
+  createCreemCheckout,
+  createCreemCustomerPortalUrl,
+  metadataFromUnknown,
+  planFromCreemProductId,
+  productIdForPlan,
+  retrieveCreemCheckout,
+  verifyCreemWebhookSignature,
+} from "../lib/creem.js";
+import {
   lemonVariantIdFromAttributes,
   listLemonSubscriptions,
   planFromVariantId,
@@ -58,6 +69,7 @@ export type PaymentMethodDto = {
 
 export type BillingOverview = {
   lemonConfigured: boolean;
+  creemConfigured: boolean;
   paypalConfigured: boolean;
   paddleConfigured: boolean;
   planSlug: PlanSlug;
@@ -98,7 +110,8 @@ export function billingOverviewFromOrg(
   org: OrganizationDocument,
 ): BillingOverview {
   return {
-    lemonConfigured: env.lemonSqueezy.configured,
+    lemonConfigured: false,
+    creemConfigured: env.creem.configured,
     paypalConfigured: false,
     paddleConfigured: false,
     planSlug: (org.planSlug ?? "starter") as PlanSlug,
@@ -117,8 +130,10 @@ export function billingOverviewFromOrg(
     cardBrand: org.cardBrand ?? null,
     cardLast4: org.cardLast4 ?? null,
     paymentMethods: paymentMethodsDto(org),
-    updatePaymentUrl: org.lemonUpdatePaymentUrl ?? null,
-    customerPortalUrl: org.lemonCustomerPortalUrl ?? null,
+    updatePaymentUrl:
+      org.creemCustomerPortalUrl ?? org.lemonUpdatePaymentUrl ?? null,
+    customerPortalUrl:
+      org.creemCustomerPortalUrl ?? org.lemonCustomerPortalUrl ?? null,
     paypalSubscriptionId: org.paypalSubscriptionId ?? null,
   };
 }
@@ -133,15 +148,16 @@ export async function getBillingOverviewForUser(
       code: "ORGANIZATION_NOT_FOUND",
     });
   }
-  if (shouldPullLemonAfterCheckout(organization)) {
-    return syncLemonSubscriptionForUser(userId);
+  if (shouldPullCreemAfterCheckout(organization)) {
+    return syncCreemSubscriptionForUser(userId);
   }
   return billingOverviewFromOrg(organization);
 }
 
 /**
- * Create a Lemon Squeezy hosted checkout URL for the org owner/admin.
- * Card details stay on Lemon (Merchant of Record). PayPal/Paddle are paused.
+ * Create a Creem hosted checkout URL for the org owner/admin.
+ * Card details stay on Creem (Merchant of Record).
+ * Lemon / PayPal / Paddle stay in the repo but are not on this path.
  */
 export async function createCheckoutSessionForUser(
   userId: string,
@@ -168,11 +184,11 @@ export async function createCheckoutSessionForUser(
     throw new AppError(401, "User not found", { code: "UNAUTHORIZED" });
   }
 
-  if (!env.lemonSqueezy.configured) {
-    if (!env.lemonSqueezy.allowMockActivate) {
+  if (!env.creem.configured) {
+    if (!env.creem.allowMockActivate) {
       throw new AppError(
         503,
-        "Lemon Squeezy is not configured. Add LEMON_SQUEEZY_API_KEY, store id, and variant ids.",
+        "Creem is not configured. Add CREEM_API_KEY and CREEM_PRODUCT_* ids (Test Mode).",
         { code: "BILLING_PROVIDER_NOT_CONFIGURED" },
       );
     }
@@ -183,41 +199,44 @@ export async function createCheckoutSessionForUser(
     return { checkoutUrl: `${env.appOrigin}/app/billing?mock=1`, mockActivated: true };
   }
 
-  const variantId = variantIdForPlan(planSlug, interval);
-  if (!variantId) {
+  const productId = productIdForPlan(planSlug, interval);
+  if (!productId) {
     throw new AppError(
       503,
-      `Missing Lemon Squeezy variant ID for ${planSlug}/${interval}. Set LEMON_SQUEEZY_VARIANT_* on the server.`,
-      { code: "LEMON_VARIANT_MISSING" },
+      `Missing Creem product ID for ${planSlug}/${interval}. Set CREEM_PRODUCT_* on the server.`,
+      { code: "CREEM_PRODUCT_MISSING" },
     );
   }
 
-  const redirectUrl = `${env.appOrigin}/app/billing?checkout=success`;
-  const { checkoutUrl, checkoutId } = await createLemonCheckout({
-    variantId,
+  const successUrl = `${env.appOrigin}/app/billing?checkout=success`;
+  const { checkoutUrl, checkoutId } = await createCreemCheckout({
+    productId,
     email: user.email ?? "",
     name: user.name ?? "",
-    custom: {
+    successUrl,
+    metadata: {
       organizationId: organization._id.toString(),
       planSlug: String(planSlug),
       interval: String(interval),
     },
-    redirectUrl,
   });
 
   try {
-    organization.pendingLemonCheckoutId = checkoutId;
-    organization.pendingLemonPlanSlug = planSlug;
-    organization.pendingLemonInterval = interval;
+    organization.pendingCreemCheckoutId = checkoutId;
+    organization.pendingCreemPlanSlug = planSlug;
+    organization.pendingCreemInterval = interval;
     await asMutableOrg(organization).save();
   } catch (err) {
-    console.error("[securevault-api] failed to save pending Lemon checkout:", err);
+    console.error("[securevault-api] failed to save pending Creem checkout:", err);
     throw new AppError(
       500,
       "Checkout was created but could not be saved. Try again.",
-      { code: "LEMON_CHECKOUT_SAVE_FAILED" },
+      { code: "CREEM_CHECKOUT_SAVE_FAILED" },
     );
   }
+
+  // Lemon hosted checkout kept for restore:
+  // const { checkoutUrl, checkoutId } = await createLemonCheckout({ ... });
 
   return { checkoutUrl };
 }
@@ -762,10 +781,36 @@ export async function syncAutoRenewToPaypal(
   }
 }
 
-/** Cancel / resume Lemon subscription when the owner toggles auto-renew.
- * Lemon owns charging: monthly variants renew monthly, yearly renew yearly.
- * Turning off sets cancelled=true (access until period end). Turning on uncancels.
+/** Cancel Creem subscription when the owner turns auto-renew off.
+ * Creem cancel API uses immediate mode — turning it back on requires a new checkout.
  */
+export async function syncAutoRenewToCreem(
+  org: OrganizationDocument,
+  autoRenew: boolean,
+): Promise<void> {
+  if (!env.creem.configured) {
+    return;
+  }
+  if (!org.creemSubscriptionId) {
+    throw new AppError(
+      400,
+      "No Creem subscription on this workspace yet. Complete a card checkout first.",
+      { code: "CREEM_SUBSCRIPTION_MISSING" },
+    );
+  }
+  if (!autoRenew) {
+    await cancelCreemSubscription(org.creemSubscriptionId);
+  }
+}
+
+export function verifyCreemWebhookRequest(
+  signatureHeader: string | undefined,
+  rawBody: string,
+): boolean {
+  return verifyCreemWebhookSignature(rawBody, signatureHeader);
+}
+
+/** Cancel / resume Lemon subscription — paused; kept for restore. */
 export async function syncAutoRenewToLemon(
   org: OrganizationDocument,
   autoRenew: boolean,
@@ -1158,6 +1203,322 @@ export async function handleLemonWebhook(
   if (type === "subscription_payment_failed") {
     org.subscriptionStatus = "pending_payment";
     org.autoRenew = false;
+    await asMutableOrg(org).save();
+  }
+
+  return { received: true };
+}
+
+function shouldPullCreemAfterCheckout(org: OrganizationDocument): boolean {
+  if (!env.creem.configured) return false;
+  if (org.pendingCreemCheckoutId || org.pendingCreemPlanSlug) {
+    return true;
+  }
+  if (
+    org.subscriptionStatus === "active" &&
+    isPaidPlanSlug(String(org.planSlug ?? ""))
+  ) {
+    return false;
+  }
+  return org.subscriptionStatus === "trialing" || org.planSlug === "free";
+}
+
+function resolveCreemPaidPlan(
+  meta: Record<string, string>,
+  productId: string,
+  fallbackOrg?: OrganizationDocument,
+): { planSlug: PaidPlanSlug; interval: BillingInterval } | null {
+  const fromProduct = planFromCreemProductId(productId);
+  const pendingSlug = String(fallbackOrg?.pendingCreemPlanSlug ?? "");
+  const planSlug = isPaidPlanSlug(meta.planSlug)
+    ? meta.planSlug
+    : isPaidPlanSlug(pendingSlug)
+      ? pendingSlug
+      : fromProduct?.planSlug;
+  const pendingInterval = fallbackOrg?.pendingCreemInterval;
+  const interval =
+    meta.interval === "monthly" || meta.interval === "yearly"
+      ? meta.interval
+      : pendingInterval === "monthly" || pendingInterval === "yearly"
+        ? pendingInterval
+        : fromProduct?.interval;
+  if (!planSlug || !interval) return null;
+  return { planSlug, interval };
+}
+
+function creemPeriodEnd(obj: Record<string, unknown>): string | null {
+  const v =
+    obj.current_period_end_date ??
+    obj.currentPeriodEndDate ??
+    obj.next_transaction_date ??
+    obj.nextTransactionDate;
+  return typeof v === "string" && v ? v : null;
+}
+
+async function applyCreemPurchaseToOrg(
+  org: OrganizationDocument,
+  patch: {
+    planSlug?: PaidPlanSlug;
+    interval?: BillingInterval;
+    subscriptionId?: string;
+    orderId?: string;
+    customerId?: string;
+    status?: string;
+    portalUrl?: string | null;
+    periodEndsAt?: string | null;
+  },
+): Promise<OrganizationDocument> {
+  if (patch.planSlug && patch.interval) {
+    await activateOrganizationSubscription(org, patch.planSlug, patch.interval);
+  }
+  const fresh = await Organization.findById(org._id);
+  if (!fresh) {
+    throw new AppError(404, "Organization no longer exists", {
+      code: "ORGANIZATION_NOT_FOUND",
+    });
+  }
+  if (patch.subscriptionId) fresh.creemSubscriptionId = patch.subscriptionId;
+  if (patch.orderId) fresh.creemOrderId = patch.orderId;
+  if (patch.customerId) fresh.creemCustomerId = patch.customerId;
+  fresh.pendingCreemCheckoutId = null;
+  fresh.pendingCreemPlanSlug = null;
+  fresh.pendingCreemInterval = null;
+
+  const periodEnd = parseLemonDate(patch.periodEndsAt);
+  if (periodEnd) fresh.currentPeriodEndsAt = periodEnd;
+
+  const status = (patch.status ?? "").toLowerCase();
+  const isCancelled =
+    status === "canceled" || status === "cancelled" || status === "expired";
+  const stillInPaidPeriod =
+    Boolean(periodEnd && periodEnd.getTime() > Date.now()) ||
+    Boolean(
+      fresh.currentPeriodEndsAt &&
+        fresh.currentPeriodEndsAt.getTime() > Date.now(),
+    );
+
+  if (isCancelled) {
+    fresh.autoRenew = false;
+    fresh.subscriptionStatus = stillInPaidPeriod ? "active" : "expired";
+  } else if (status === "paused" || status === "past_due" || status === "unpaid") {
+    fresh.autoRenew = false;
+    fresh.subscriptionStatus = stillInPaidPeriod ? "active" : "pending_payment";
+  } else if (status === "active" || status === "paid" || status === "trialing" || patch.planSlug) {
+    fresh.autoRenew = true;
+    if (patch.interval) fresh.autoRenewInterval = patch.interval;
+    else if (fresh.billingInterval) fresh.autoRenewInterval = fresh.billingInterval;
+    fresh.subscriptionStatus = status === "trialing" ? "trialing" : "active";
+  }
+
+  if (patch.portalUrl) {
+    fresh.creemCustomerPortalUrl = patch.portalUrl;
+    fresh.lemonUpdatePaymentUrl = patch.portalUrl;
+    fresh.lemonCustomerPortalUrl = patch.portalUrl;
+  }
+  await asMutableOrg(fresh).save();
+  return fresh;
+}
+
+function checkoutLooksPaid(checkout: Record<string, unknown>): boolean {
+  const status = String(checkout.status ?? "").toLowerCase();
+  if (status === "completed" || status === "paid") return true;
+  const order = asRecord(checkout.order);
+  const orderStatus = String(order.status ?? "").toLowerCase();
+  return orderStatus === "paid" || orderStatus === "completed";
+}
+
+async function applyCreemCheckoutObject(
+  org: OrganizationDocument,
+  checkout: Record<string, unknown>,
+): Promise<OrganizationDocument> {
+  const meta = {
+    ...metadataFromUnknown(checkout.metadata),
+    organizationId: org._id.toString(),
+    planSlug: org.pendingCreemPlanSlug ?? "",
+    interval: org.pendingCreemInterval ?? "",
+  };
+  const productId = asId(checkout.product);
+  const subscription = asRecord(checkout.subscription);
+  const order = asRecord(checkout.order);
+  const customer = asRecord(checkout.customer);
+  const resolved = resolveCreemPaidPlan(meta, productId, org);
+  let portalUrl: string | null = org.creemCustomerPortalUrl ?? null;
+  const customerId = asId(customer.id) || asId(checkout.customer);
+  if (customerId) {
+    try {
+      portalUrl = (await createCreemCustomerPortalUrl(customerId)) ?? portalUrl;
+    } catch (err) {
+      console.warn("[billing] creem portal link failed:", err);
+    }
+  }
+  return applyCreemPurchaseToOrg(org, {
+    planSlug: resolved?.planSlug,
+    interval: resolved?.interval,
+    subscriptionId: asId(subscription.id) || asId(checkout.subscription),
+    orderId: asId(order.id) || asId(checkout.order),
+    customerId,
+    status: String(subscription.status ?? checkout.status ?? "active"),
+    portalUrl,
+    periodEndsAt: creemPeriodEnd(subscription),
+  });
+}
+
+const creemSyncInFlight = new Map<string, Promise<BillingOverview>>();
+
+/**
+ * After Creem hosted checkout, webhooks often never reach localhost.
+ * Pull the checkout (or customer) from Creem and activate the plan.
+ */
+export async function syncCreemSubscriptionForUser(
+  userId: string,
+): Promise<BillingOverview> {
+  const { membership } = await loadMembershipContext(userId);
+  const orgId = membership.organizationId.toString();
+  const existing = creemSyncInFlight.get(orgId);
+  if (existing) return existing;
+
+  const run = (async () => {
+    const organization = await Organization.findById(membership.organizationId);
+    if (!organization) {
+      throw new AppError(404, "Organization no longer exists", {
+        code: "ORGANIZATION_NOT_FOUND",
+      });
+    }
+    if (
+      organization.subscriptionStatus === "active" &&
+      isPaidPlanSlug(String(organization.planSlug ?? "")) &&
+      organization.creemSubscriptionId &&
+      !organization.pendingCreemCheckoutId &&
+      !organization.pendingCreemPlanSlug
+    ) {
+      return billingOverviewFromOrg(organization);
+    }
+    if (!env.creem.configured) {
+      return billingOverviewFromOrg(organization);
+    }
+
+    if (organization.pendingCreemCheckoutId) {
+      try {
+        const checkout = await retrieveCreemCheckout(
+          organization.pendingCreemCheckoutId,
+        );
+        if (checkoutLooksPaid(checkout)) {
+          const updated = await applyCreemCheckoutObject(organization, checkout);
+          return billingOverviewFromOrg(updated);
+        }
+      } catch (err) {
+        console.warn("[billing] creem checkout retrieve failed:", err);
+      }
+    }
+
+    return billingOverviewFromOrg(organization);
+  })().finally(() => {
+    creemSyncInFlight.delete(orgId);
+  });
+
+  creemSyncInFlight.set(orgId, run);
+  return run;
+}
+
+export async function handleCreemWebhook(
+  event: unknown,
+): Promise<{ received: true }> {
+  const root = asRecord(event);
+  const type = String(root.eventType ?? root.event_type ?? "");
+  const obj = asRecord(root.object);
+  const meta = {
+    ...metadataFromUnknown(obj.metadata),
+    ...metadataFromUnknown(root.metadata),
+  };
+  const productId = asId(obj.product) || asId(asRecord(obj.product).id);
+  const subscriptionId =
+    String(obj.object ?? "") === "subscription" ? asId(obj.id) : asId(obj.subscription);
+  const orderId = asId(obj.order) || asId(asRecord(obj.order).id);
+  const customerId = asId(obj.customer) || asId(asRecord(obj.customer).id);
+  const checkoutId = String(obj.object ?? "") === "checkout" ? asId(obj.id) : "";
+
+  let org: OrganizationDocument | null = null;
+  if (meta.organizationId) {
+    org = await Organization.findById(meta.organizationId);
+  }
+  if (!org && subscriptionId) {
+    org = await Organization.findOne({ creemSubscriptionId: subscriptionId });
+  }
+  if (!org && orderId) {
+    org = await Organization.findOne({ creemOrderId: orderId });
+  }
+  if (!org && checkoutId) {
+    org = await Organization.findOne({ pendingCreemCheckoutId: checkoutId });
+  }
+  if (!org && customerId) {
+    org = await Organization.findOne({ creemCustomerId: customerId });
+  }
+
+  const paidEvents = new Set([
+    "checkout.completed",
+    "subscription.active",
+    "subscription.paid",
+    "subscription.trialing",
+    "subscription.update",
+  ]);
+
+  if (!org) {
+    if (paidEvents.has(type)) {
+      console.warn("[billing] creem webhook unmatched", {
+        event: type,
+        hasOrganizationId: Boolean(meta.organizationId),
+      });
+    }
+    return { received: true };
+  }
+
+  if (paidEvents.has(type)) {
+    if (type === "checkout.completed") {
+      await applyCreemCheckoutObject(org, obj);
+      return { received: true };
+    }
+    const resolved = resolveCreemPaidPlan(meta, productId, org);
+    let portalUrl = org.creemCustomerPortalUrl ?? null;
+    if (customerId) {
+      try {
+        portalUrl = (await createCreemCustomerPortalUrl(customerId)) ?? portalUrl;
+      } catch {
+        /* keep existing */
+      }
+    }
+    await applyCreemPurchaseToOrg(org, {
+      planSlug: resolved?.planSlug,
+      interval: resolved?.interval,
+      subscriptionId: subscriptionId || undefined,
+      orderId: orderId || undefined,
+      customerId: customerId || undefined,
+      status: String(obj.status ?? "active"),
+      portalUrl,
+      periodEndsAt: creemPeriodEnd(obj),
+    });
+    return { received: true };
+  }
+
+  if (
+    type === "subscription.canceled" ||
+    type === "subscription.expired" ||
+    type === "subscription.paused" ||
+    type === "subscription.scheduled_cancel" ||
+    type === "subscription.past_due"
+  ) {
+    const periodEnd =
+      parseLemonDate(creemPeriodEnd(obj)) ?? org.currentPeriodEndsAt;
+    if (periodEnd) org.currentPeriodEndsAt = periodEnd;
+    org.autoRenew = false;
+    if (type === "subscription.expired") {
+      org.subscriptionStatus = "expired";
+    } else if (periodEnd && periodEnd.getTime() > Date.now()) {
+      org.subscriptionStatus = "active";
+    } else if (type === "subscription.past_due" || type === "subscription.paused") {
+      org.subscriptionStatus = "pending_payment";
+    } else {
+      org.subscriptionStatus = "expired";
+    }
     await asMutableOrg(org).save();
   }
 

@@ -11,10 +11,12 @@ import {
   getPaddleCheckoutConfig,
   getPaypalCardClientToken,
   getPaypalCardSdkConfig,
+  handleCreemWebhook,
   handleLemonWebhook,
   handlePaddleWebhook,
   handlePaypalWebhook,
-  syncLemonSubscriptionForUser,
+  syncCreemSubscriptionForUser,
+  verifyCreemWebhookRequest,
   verifyLemonWebhookRequest,
   verifyPaddleWebhookRequest,
   verifyPaypalWebhookRequest,
@@ -34,7 +36,7 @@ export async function billingOverview(req: Request, res: Response) {
 }
 
 export async function syncCheckout(req: Request, res: Response) {
-  const billing = await syncLemonSubscriptionForUser(requireUserId(req));
+  const billing = await syncCreemSubscriptionForUser(requireUserId(req));
   res.status(200).json({ billing });
 }
 
@@ -108,6 +110,23 @@ export async function confirmPaddleCheckout(req: Request, res: Response) {
     transactionId,
   );
   res.status(200).json({ billing });
+}
+
+export async function creemWebhook(req: Request, res: Response) {
+  const raw = (req as Request & { rawBody?: Buffer }).rawBody?.toString("utf8");
+  if (!raw) {
+    throw new AppError(401, "Invalid Creem webhook signature", {
+      code: "WEBHOOK_SIGNATURE_INVALID",
+    });
+  }
+  const ok = verifyCreemWebhookRequest(req.get("creem-signature") ?? undefined, raw);
+  if (!ok) {
+    throw new AppError(401, "Invalid Creem webhook signature", {
+      code: "WEBHOOK_SIGNATURE_INVALID",
+    });
+  }
+  const result = await handleCreemWebhook(req.body);
+  res.status(200).json(result);
 }
 
 export async function lemonWebhook(req: Request, res: Response) {

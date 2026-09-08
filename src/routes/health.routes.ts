@@ -19,7 +19,8 @@ healthRouter.get("/", (_req, res) => {
       status: getDatabaseStatus(),
     },
     billing: {
-      lemonConfigured: env.lemonSqueezy.configured,
+      creemConfigured: env.creem.configured,
+      lemonConfigured: false,
     },
   });
 });
@@ -39,7 +40,8 @@ healthRouter.get("/ready", (_req, res) => {
       status: databaseStatus,
     },
     billing: {
-      lemonConfigured: env.lemonSqueezy.configured,
+      creemConfigured: env.creem.configured,
+      lemonConfigured: false,
     },
   });
 });
